@@ -15,9 +15,6 @@
 
 ###############################
 
-library(ggplot2)
-library(lubridate)
-
 # read in data
 Bac <- read.table("BacCounts.txt" , header = T , sep = "\t")
 
