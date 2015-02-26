@@ -15,6 +15,7 @@ Eco<-rbind(EcoM,EcoE)
 Eco$DAT <-  dmy_hm(Eco$DAT)
 
 
+
 ####### first very rough statistics to eyeball the data ######
 
 # take median OD595 for each Well on each date (replicates are read silmoutaniously so I split by DAT)
@@ -76,5 +77,47 @@ ggplot(EcoMt, aes(x=DIV,y=prct))+
 ggplot(EcoMt, aes(x=DIV,y=delta))+
   geom_point()+
   facet_wrap(~Tox)
+
+######### check average well colour developpment for dose response curve ########
+
+# extract 72 hours timepoint
+
+# function to calculate incubation timepoint of plates
+delta.T<-function(x)  {x$dT <- as.numeric(round((x$DAT-(min(x$DAT)-hms(paste(min(x$hour),"00:00",sep=":"))))*24))
+                       return(x)}
+
+# function to subset for timelslot t1 < x < t2
+Func <- function(x) {return(x[x$dT %in% c(71,72), ])}
+
+# add deltaT column to Eco
+Eco<-do.call(rbind.data.frame, (by(Eco, Eco[,c(6,17)], delta.T)))
+
+#extract reading at ~ 72 hours
+Eco72<-do.call(rbind.data.frame, (by(Eco, Eco[,c(6,17)], Func)))
+
+# calculate AWCD for whole plate
+AWCD72 <- ddply(Eco72, .(BOT, DIV,Tox,ToxC,Timepoint), summarize, AWCD = mean (OD590))
+
+# plot AWCD vs DIV*TOX
+
+ggplot(AWCD72[AWCD72$Timepoint == "end",], aes(x=log(ToxC), y=AWCD))+
+  geom_point()+
+  facet_wrap(~DIV)
+  
+# calculate Colour for each compound on each plate at 72h
+  
+CC <- ddply(Eco72, .(BOT, DIV,Tox,ToxC,Timepoint, C.Source), summarize, AWCD = median (OD590))
+  
+  
+ggplot(CC[CC$Timepoint == "end",], aes(x=log(ToxC), y=AWCD,colour=DIV))+
+  geom_point()+
+  geom_line()+
+  facet_wrap(~C.Source)
+  
+
+
+
+
+
 
 
