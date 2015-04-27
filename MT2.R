@@ -8,8 +8,7 @@ MT2$DAT <-  dmy_hm(MT2$DAT)
 subC <- function(x) { y <- x[x$Comp != "Blank",]
                       y$OD590 <- y$OD590 - median(x[x$Comp == "Blank",]$OD590)
                       z <- y[y$Comp != "Cont",]
-                      z$OD590 <- z$OD590 -  medi
-                      an(y[y$Comp == "Cont",]$OD590)
+                      z$OD590 <- z$OD590 -  median(y[y$Comp == "Cont",]$OD590)
                       return(z) }
 
 MT2b <- do.call(rbind.data.frame, (by(MT2, MT2[,c("Plate","DAT","set")], subC)))
@@ -32,9 +31,21 @@ ggplot(MT2b60[MT2b60$DIV %in% c(1,5),], aes(x=Conc+1e-11, y=OD590))+
   geom_point()+
   facet_wrap(~Plate*Comp,ncol=5,nrow=14)+
   scale_x_log10()+
-  stat_smooth()
+  stat_smooth()+
+  theme_bw()
 
 
+ggplot(MT2b60[MT2b60$Plate %in% c("Div1","Div3","Div5"),], 
+       aes(x=Conc+1e-11, y=OD590, colour=as.factor(DIV)))+
+  geom_point()+
+  facet_wrap(~Plate*Comp,ncol=5,nrow=14)+
+  scale_x_log10()+
+  stat_smooth()+
+  theme_bw(base_size=15)+
+  labs(x="toxicity", y="OD (relative to control)")+
+  theme(legend.position="none")
+  
+  
 
 
 
