@@ -8,7 +8,8 @@ MT2$DAT <-  dmy_hm(MT2$DAT)
 subC <- function(x) { y <- x[x$Comp != "Blank",]
                       y$OD590 <- y$OD590 - median(x[x$Comp == "Blank",]$OD590)
                       z <- y[y$Comp != "Cont",]
-                      z$OD590 <- z$OD590 -  median(y[y$Comp == "Cont",]$OD590)
+                      z$OD590 <- z$OD590 -  medi
+                      an(y[y$Comp == "Cont",]$OD590)
                       return(z) }
 
 MT2b <- do.call(rbind.data.frame, (by(MT2, MT2[,c("Plate","DAT","set")], subC)))
