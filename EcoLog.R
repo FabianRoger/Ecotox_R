@@ -100,18 +100,23 @@ AWCD72 <- ddply(Eco72, .(BOT, DIV,Tox,ToxC,Timepoint), summarize, AWCD = mean (O
 
 # plot AWCD vs DIV*TOX
 
-ggplot(AWCD72[AWCD72$Timepoint == "end",], aes(x=log(ToxC), y=AWCD))+
+AWCD72<-AWCD72[-c(grep("S",AWCD72$DIV)),]
+
+ggplot(AWCD72[AWCD72$Timepoint == "end",], aes(x=ToxC+1e-12, y=AWCD))+
   geom_point()+
+  scale_x_log10()+
   facet_wrap(~DIV)
   
 # calculate Colour for each compound on each plate at 72h
   
 CC <- ddply(Eco72, .(BOT, DIV,Tox,ToxC,Timepoint, C.Source), summarize, AWCD = median (OD590))
+
+CC<-CC[-c(grep("S",CC$DIV)),]
   
-  
-ggplot(CC[CC$Timepoint == "end",], aes(x=log(ToxC), y=AWCD,colour=DIV))+
+ggplot(CC[CC$Timepoint == "end",], aes(x=ToxC+1e-11, y=AWCD,colour=DIV))+
   geom_point()+
-  geom_line()+
+  stat_smooth(se=F)+
+  scale_x_log10()+
   facet_wrap(~C.Source)
   
 
