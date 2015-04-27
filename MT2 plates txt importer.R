@@ -1,10 +1,10 @@
 
-library(plyr)
+oldwd <- getwd()
 
 # set working directory with all txt files to import
 
-#setwd("/Users/fabianroger/Documents/01_PhD/01_Research/03_Ecotox/MT2/MT2 Mid")
-setwd("/Users/fabianroger/Documents/01_PhD/01_Research/03_Ecotox/MT2/MT2 End")
+setwd("/Users/fabianroger/Documents/01_PhD/01_Research/03_Ecotox/MT2/MT2 Mid")
+#setwd("/Users/fabianroger/Documents/01_PhD/01_Research/03_Ecotox/MT2/MT2 End")
 
 # list of all files in wd
 
@@ -99,7 +99,7 @@ MT2End<-MT2
 ################
 #add well information
 ################
-setwd("/Users/fabianroger/Documents/01_PhD/01_Research/03_Ecotox/R")
+setwd(oldwd)
 
 WI.Mid<-read.csv("WI_MT2Mid.csv",header=T)
 WI.End<-read.csv("WI_MT2End.csv",header=T)
