@@ -1,0 +1,573 @@
+---
+title: "Analysis of Ecolog plates"
+author: "Fabian Roger"
+date: "21 Jun 2016"
+output:
+  html_document:
+    fig_caption: yes
+    toc: yes
+  pdf_document:
+    latex_engine: lualatex
+    toc: yes
+---
+
+In this script I import and clean the data from the 
+Carbon Source Utilization Profiling using the BIOLOG™ Ecoplates
+
+
+
+__this script imports:__ 
+
++ Ecolog/Biolog_reads.txt       # raw OD readings for all samples from Biolog EcoPlate
++ BOT_ID.txt                    # sample metadata
+   
+__this script does:__
+
+  + quality control 
+  + bias correction
+  
+__this script exports:__
+  
+  data frames:
+  
+  
+```{r, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message=FALSE)
+```
+
+```{r load packages, echo = FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(broom)
+library(minpack.lm)
+library(magrittr)
+library(tidyr)
+library(phyloseq)
+library(vegan)
+library(flux)
+
+```
+
+The plates have the following layout:
+![](EcoLogDocs/Ecoplate.jpg)   
+
+From Graland et al 1996:
+
+> BIOLOG plates, 96 well microtiter plates containing separate sole C sources and a redox indicator dye, produce patterns of potential C source utilization for microbial communities. 
+
+The Ecoplates contain 31 different carbon sources in triplicates and three negative controls with the dye but no carbon source. 
+The carbon sources are in the wells `B1` to `H4`, the negative control is in well `A1`. 
+
+We incubated the plates directly with 150µl in each well and incubated them in the dark at room temperature for up to 100 hours. The plates were measured approximately every 12 hours to estimate the rate of the color development.
+
+First, we import the data and look at it.
+
+```{r import data}
+EcoL <- read.table("Ecolog/Biolog_reads.txt", stringsAsFactors = F)
+head(EcoL)
+
+unique(EcoL$Sampling)
+unique(EcoL$rep)
+sort(unique(EcoL$Date))
+```
+
+`EcoL` has the following `r ncol(EcoL)` columns: `r colnames(EcoL)`
+
+`$Date` and `$Time` give the exact time point when the plate was read and `$Sampling` represents the two independent sampling points. The `$hour` column gives the nominal time point of the reading. The `$BOT`column says from which bottle the sample was taken.
+
+First, we merge the date and time column and transform it into POSIXct format. We
+then proceed and add and `$dhour`column that gives the exact time difference
+(in hours) from the first to the last reading for each plate. 
+
+```{r check&prepare data4, echo=FALSE}
+EcoL$Timepoint <- as.POSIXct( strptime( paste( EcoL$Date, EcoL$Time),"%Y-%m-%d %H:%M:%S"))
+
+EcoL.list <- split(EcoL, list(EcoL$BOT, EcoL$Sampling))
+
+EcoL.list <- lapply(EcoL.list, function(x) { x <-  x[with(x, order(hour)), ]
+x$dhour  <- (difftime( x$Timepoint[1], x$Timepoint, units = "hours")*-1) + x$hour[1]
+return(x) })
+
+EcoL <- do.call( rbind, EcoL.list)
+
+EcoL$dhour <- as.numeric(EcoL$dhour)
+
+head(EcoL[ ,c("BOT", "OD700", "dhour")], 1)
+tail(EcoL[ ,c("BOT", "OD700", "dhour")], 1)
+
+```
+
+Let's look at this information to see when the plates have been read and how long they have been incubated.
+
+```{r check&prepare plot1, warning=FALSE, echo=FALSE}
+select(EcoL, Sampling, BOT, hour, dhour) %>%
+  mutate(Sampling = factor(Sampling, levels = c("Mid", "End")), dhour = as.numeric(dhour)) %>%
+  distinct() %>%
+  
+  ggplot(aes(x = dhour, y = Sampling, colour = Sampling))+ 
+    geom_point(alpha = 0.6)+
+    geom_vline( aes(xintercept = hour, colour = Sampling), linetype = "dashed") +
+    theme_bw(base_size = 13)+
+    facet_wrap(~ Sampling, nrow = 2, scales = "free_y" )+
+    labs(x = "timepoint of sampling", y = "sampling occasion", title = "distribution of readings")+
+    theme(legend.position = "none")
+```
+
+We can see that the exact intervals vary  and that curiously, the total number of readings goes up to 8 per plate at the last sampling. The experimentator seemed to have gotten increasingly excited and motivated throughout the course of the experiment.
+
+We read the plates at three different ODs. `OD590`, `OD595` & `OD700` and calculate the corrected OD readings as decribed in 
+
+[Johansson H, Janmar L, Backhaus T. (2014) Toxicity of ciprofloxacin and sulfamethoxazole to marine periphytic algae and bacteria. PeerJ PrePrints 2:e330v1](https://doi.org/10.7287/peerj.preprints.330v1)
+
+>+ Calculation of the background color development bckgd, as the median of the three
+wells without any added carbon source (blanks) per plate.
++Calculation of the color development (corrected absorbance, CorrOD) for each well that contained an added carbon source and for each Ecolog incubation time. This provides a measure of the total catabolic activity per carbon source and is calculated as the optical density at 595 nm (absorbance of the tetrazolium dye after oxidation) corrected for background and turbidity of the sample (absorbance at 700 nm): corrected optical density for each well as:
+CorrOD =(OD595 – OD700)-bckgd
+
+I calculate the background color development `bckgd` from the coorected blanks (OD595-OD700), too. 
+
+```{r calculate corrected OD}
+
+# calculate the corrected OD (OD595 - OD700)
+EcoL <- EcoL %>% 
+  mutate(CorrOD = OD595 - OD700)
+
+# calculate median blank for each plate at each reading
+Blanks <- EcoL %>% 
+  filter(Wells == "A1") %>% 
+  select(Sampling, BOT, hour, CorrOD) %>% 
+  group_by(Sampling, BOT, hour) %>% 
+  summarise(bckgd = median(CorrOD))
+
+# substract (corrected) background colour dev. from corrected OD
+EcoL <- EcoL %>% 
+  filter(Wells != "A1") %>% 
+  left_join(., Blanks) %>% 
+  mutate(CorrOD = CorrOD - bckgd)
+
+# define corrected ID values < 0 as 0
+EcoL[EcoL$CorrOD < 0, ]$CorrOD <- 0
+
+
+EcoL %>% filter(BOT == 2, Sampling == "Mid") %>% 
+  ggplot(. , aes(y= OD595, x = dhour, colour = Wells))+
+  geom_line(linetype = "dashed")+
+  geom_line(aes(x = hour, y = CorrOD))+
+  theme_bw()+
+  facet_wrap(~Wells * rep, labeller = label_wrap_gen(multi_line = FALSE), ncol = 9)+
+  labs(x = "time (hours)", title = "example ecolog plate (BOT 5, sampling 06/28)\ndashed line is OD cutoff (OD = 0.2), the 3 replicates of the same carbon sources are shown in same colour ")+
+  theme(legend.position = "none")
+  
+```
+
+
+With the corrected OD vaues we will no compute two response variables. 
+
++ the number of positive carbon sources on each plate
++ the median uptake rate of each carbon source on each plate. 
+
+Only those wells that show an OD development of over 0.2 are counted as
+positives. Because we need the full data set to calculate the median uptake rate, we start with this:
+
+### median uptake rate of carbon sources
+
+To calculate the uptake rate of the carbon source, we fit a modified Gompertz
+model of the form:
+
+$$ OD = K*exp(-exp{(\frac{r*e}{K}*(l-t)+1)} $$
+
+where 
+
++ $r$ is the maximum slope
++ $K$ the maximum OD and 
++ $l$ the lag phase
+
+We then extract the $r$ parameter and take it as the **uptake rate** 
+
+However, we only keep $r$ estimates of models that 
+
++ converged
++ the parameter estimate for $r$ is significant at p < 0.01
+
+**only wells that reach an OD ≥ 0.2 are counted as *positive*. Accordingly, we attempt to model only those wells and exclude all others**
+
+Note that I use `nlsLM` from the minpack.lm package to fit the gompertz function. It is much more efficient at fitting the wast majority of the samples than `nls`. 
+
+I use the following starting values. 
+`start = list(K = 2, l = 30, r = 0.02)`
+Usually I would model all wells once and then use the median parameter estimates as new starting values but in this case the naive estimates above result in more successfull fits. 
+
+
+```{r model uptake rates}
+
+EcoL0.2 <- group_by(EcoL, Sampling, BOT, Wells, rep) %>%
+  summarize(maxOD = max(CorrOD)) %>% 
+  filter(maxOD >= 0.2) %>%
+  inner_join(EcoL, .)
+
+# fit function to all Wells with positive reponse
+FitNls <- EcoL0.2 %>%
+  group_by(Sampling, BOT, Wells, rep) %>%
+  do(gompertz_fit = try(nlsLM( CorrOD ~ K * exp( -exp((( r * exp( 1)) / K) * (l - dhour) + 1)),
+                        data = .,
+                        start = list(K = 1.28, l = 44, r = 0.03),
+                        control = list(maxiter = 100)),
+                        silent = T))
+
+# try to refit wells that failed at the first attempt with differnt start values (and with gentle brootforce)
+EcoL_no_fit <- filter(FitNls, class(gompertz_fit) != "nls")
+
+FitNls2 <- semi_join(EcoL0.2, EcoL_no_fit) %>% group_by(Sampling, BOT, Wells, rep) %>%
+  do(gompertz_fit = try(nlsLM( CorrOD ~ K * exp( -exp((( r * exp( 1)) / K) * (l - dhour) + 1)),
+                        data = .,
+                        start = list(K = 0.5, l = 10, r = 0.02),
+                        control = list(maxiter = 1024)),
+                        silent = T))
+
+FitNls <- rbind(FitNls,FitNls2)
+
+EcoL_fit <-  FitNls %>%  
+  filter(class(gompertz_fit) == "nls") %>% 
+  tidy(gompertz_fit) %>% 
+  group_by(term) %>% 
+  filter(term == "r")
+
+```
+
+`r nrow(EcoL_fit)` out of `r nrow(FitNls)` could be modeled successfully.
+
+To see whether we failed to model wells that should have been modeled, we inspect the not modeled wells graphically.
+
+```{r inspect failed models, fig.width= 12, fig.height=10}
+
+filter(FitNls, class(gompertz_fit) != "nls") %>% 
+  left_join(.,EcoL) %>% 
+  ggplot(aes(x = dhour, y = CorrOD))+
+  geom_point()+
+  facet_wrap(~Sampling * BOT * Wells * rep, labeller = label_wrap_gen(multi_line = FALSE))+
+  labs(title = "wells that failed to be modeled")+
+  theme_bw()
+```
+
+In total, only very few wells failed. Moreover, in only few cases two replicates of the same well failed to model meaning that in all other failed wells, the other (one or two) replictes were modeled successfully. In total, too few wells failed to be concerned about them biasing the results. We can safely ignore them. 
+
+However, we also have to check the quality of the parameter estimates:
+
+```{r inspect successfull models, fig.width=6, fig.height=6, warning=FALSE}
+
+ggplot(EcoL_fit, aes(x= estimate))+
+  geom_histogram(binwidth = 0.2)+
+  theme_bw()+
+  scale_y_sqrt()+
+  labs(title = "histogramm of all paramter estimates, bin = 0.2, counts are sqrt-transformed")
+
+ggplot(EcoL_fit, aes(x= estimate))+
+  geom_histogram(binwidth = 0.01)+
+  geom_histogram(data = filter(EcoL_fit, p.value <= 0.001), aes(x = estimate), binwidth = 0.01, fill = "red", alpha = 0.4)+
+  theme_bw()+
+  labs(title = "histogramm of all estimates falling in the interval -0.01 ≤ r ≤ 0.5 (black) and \nsignificant parameter estimates at p ≤ 0.001 (red)\nbin = 0.01, untransformed counts")+
+  scale_x_continuous(limits = c(-0.01,0.5))
+```
+
+We see that the bulk of estimates is in a rather narrow range with `0 ≤ r ≤ 0.1`  but some estimators fall (way) outside this range. The significant estimators have less outliers and are more realistic. To avoid biases from outliers in the estimation of functional diversity without needing to exclude too much data, we adopt the following approach:
+
++ Wells that we defined as positive (see below) but were no `r` could be estimated are excluded
++ we take the unfiltered estimators and calculate the median `r` for all remaining Wells that we defined as positive
++ we truncate the estimated `r` at `0 ≤ r ≤ quantile(r.sig, 0.99)` where `r.sig` denotes the parameter estimates of `r` with a `p.value ≤ 0.001`
+
+This last step takes the good estimates to make a qualified guess about a realistic range of `r` values and prevents the influence of outliers.
+
+According to our definition **we score those wells as positive, where the median maximum OD among the replicates is ≥ 0.2**. 
+This is equivalent to 2 out of 3 replicates reaching an OD ≥ 0.2. 
+
+So we go back to the full data set and 
+
++ compute the maximum OD 
++ calculate the median maximum OD
++ filter out all Wells with a medium max OD < 0.2
++ join the uptake rates to the remaining Wells
++ proceed with the steps above
+
+
+```{r filter and join data}
+# get wells that we define as "positive"
+EcoL_pos <- group_by(EcoL, Sampling, BOT, Wells, rep) %>%
+  summarize(maxOD = max(CorrOD)) %>% 
+  summarize(med_max_OD = median( maxOD)) %>% 
+  filter(med_max_OD >= 0.2)
+
+# subset wells for maxOD ≥ 0.2 again, keep wells that we scored as positive (= exclude wells that have a single replicate with max_OD ≥ 0.2)
+# join modelled uptake rate
+
+MaxR <- filter(EcoL_fit, p.value <= 0.001) %$%  #defining maximum r value after which we truncate
+  summarize(., r = quantile(estimate, 0.99))
+
+MaxR$r
+
+EcoL_r <- group_by(EcoL, Sampling, BOT, Wells, rep) %>% 
+  summarize(maxOD = max(CorrOD)) %>%
+  filter(maxOD >= 0.2) %>% # all Wells with maxOD ≥ 0.2 (= all the Wells we modelled)
+  left_join(EcoL_pos, .) %>% # joining to all the wells that we scored as positive (excluding wells were only single repl maxOD ≥ 0.2) 
+  left_join(EcoL_fit) %>% # join parameter estimate and exclude Wells that couldn't be estimated
+  group_by(Sampling, BOT, Wells) %>% 
+  summarize(estimate = median(estimate)) %>% # take median uptake rate of the (at least 2) replicates 
+  filter(estimate > 0) %>% # instead of replacing ODmax < 0 with 0, we exclude them. A carbon source with 0 uptake rate will not be counted as positive
+  mutate(estimate = replace(estimate, estimate > MaxR$r, MaxR$r)) %>% # truncate all estimates > MaxR at MaxR
+  rename(r_max = estimate)
+  
+
+```
+
+### Area under the curve
+
+We also calculate the area under the curve for all wells that we succsessfully modelled (And kept after data cleaning, see above)
+
+
+For that we 
+
++ smooth the fitted curves by predicting on hourly data, in the range 0 -124h
++ calculate the area under the curve for the predicted data, using the `auc` function from the `flux` package. between the predicted points, the function interpolates linarly and subdivides the segment in 100 sub-segments.
++ keep auc estimates for all wells for which we also kept an rmax estimate
+
+```{r}
+
+PRED <- function(x){ # defining function to predict with fitted values 
+  fit <- predict(x$gompertz_fit[[1]], newdata = data.frame(dhour = seq(0,124,1)))
+  DF <- data.frame(Sampling = x$Sampling,
+                   BOT = x$BOT,
+                   Wells = x$Wells,
+                   rep = x$rep,
+                   dhour = seq(0,124,1),
+                   fit = fit)
+  return(DF)
+}
+
+Fit.list <- FitNls %>% filter(class(gompertz_fit) != "try-error") %>% split(1:NROW(.)) # split FitNls into list 
+
+pred.list <- lapply(Fit.list, PRED) # predict each model with extended x-values
+
+Fit.pred <- do.call("rbind", pred.list) # rbind as data.frame
+
+# calculate area under the curve
+Fit_auc <- FitNls.predicted %>% group_by(Sampling, BOT, Wells, rep) %>% summarise(auc = auc(x = dhour, y = fit))
+
+#join to EcoL_r so that only Wells defined as positive there are taken into account. 
+EcoL_rmax_auc <- group_by(Fit_auc, Sampling, BOT, Wells) %>% 
+  summarize(auc = median(auc)) %>% 
+  left_join(EcoL_r, .) 
+
+```
+
+
+export the EcoLog data
+
+```{r}
+
+select(EcoL, Sampling, BOT, Wells, rep, Compound, Group, dhour, CorrOD) %>% 
+  left_join(EcoL_rmax_auc) %>% 
+  write.table("Ecolog/EcoLog.txt", sep = "\t")
+
+```
+
+
+### calculate 
+
+Now we need to put the data in the form of a matrix where each row is a plate and each column is a carbon source. We will take each carbon source as different *trait* with the estimated uptake rate (`r`) as *trait value*. 
+
+For that we first create a data frame with `Sample` and `Bot` and a unique `Sample_BOT` identifier, and the estimated uptake rates
+
+```{r prepare calculation of functional diversity}
+EcoL_Func <- EcoL %>% 
+  select(Sampling, BOT, Wells) %>%
+  distinct() %>% 
+  mutate(ID = paste(Sampling, BOT, sep = "_")) %>% 
+  left_join( . , EcoL_rmax_auc ) %>% 
+  mutate(r_max = replace(r_max, is.na(r_max), 0)) %>% 
+  mutate(auc = replace(auc, is.na(auc), 0)) 
+
+EcoL_Func_M_r <- 
+  spread(EcoL_Func, Wells, r_max) %T>%
+  {assign("RowNames", .$ID, pos = ".GlobalEnv" )} %>%  # we store the rownames seperately to be sure to not mix up our sample names
+  select( -ID, -Sampling, -BOT) %>% 
+  as.matrix()
+
+rownames(EcoL_Func_M) <- RowNames
+```
+
+Let's take the chance to look at the utilization pattern on the EcoLog plates. 
+
+```{r plot heatmap of ecolog plates, echo = FALSE, fig.width = 14, fig.height = 8}
+ID <- read.table("BOT_ID.txt", colClasses = c("character")) %>%
+  mutate( BOT = as.integer(BOT), ToxC = as.numeric(ToxC)) %>% 
+  arrange( DIV, ToxC) %>% 
+  mutate(bot_label = paste(DIV, Tox, sep = " "))
+
+ID <- rbind(ID,ID) %>% mutate(Sampling = rep( c("Mid", "End"), each = nrow(ID)))
+
+rownames(ID) <- paste(ID$Sampling, ID$BOT, sep="_")
+
+WellID <- read.table("EcoLog/Compounds.txt", header=T, stringsAsFactors = FALSE) %>% 
+  arrange( Group) %>% 
+  mutate(Well_label = paste(Compound, Group, sep = " | "))
+
+rownames(WellID) <- WellID$Wells
+
+Ecolog_phylo <- phyloseq(otu_table(EcoL_Func_M, taxa_are_rows = FALSE),
+                         sample_data(ID),
+                         tax_table(as.matrix(WellID)))
+
+sample_data(Ecolog_phylo)$Sampling <- factor(sample_data(Ecolog_phylo)$Sampling, levels = c("Mid", "End"))
+
+C_heat <- plot_heatmap(Ecolog_phylo,
+             sample.label = "bot_label",
+             sample.order = rownames(ID),
+             taxa.label = "Well_label",
+             taxa.order = rownames(WellID))+
+  theme_bw(base_size = 11)+
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5),
+        legend.position = "bottom")+
+    facet_wrap( ~ Sampling, scales = "free_x", ncol = 3)+
+  ggtitle("carbon source utilization pattern")
+
+C_heat
+  
+```
+
+Now we calculate functional diversity of the samples. For that we will consider each carbon source as trait and the uptake rate as trait value. However, as we don't have information about which species have which traits we cannot compute trait diversity as it is usually done. 
+
+We choose another approach which is equivalent to the way we calculate species richness, i.e. the effective number of traits in the community. For that we will calculate the Shannon entropy of traits in each sample, taking the uptake rate as "relative abundance". We will then convert the entropy to an effective number. 
+
+In our case the minimum value is 0 (no carbon source is metabolized) and the maximum value is 31 (all carbon sources are metabolized evenly).
+
+```{r calculate functional diveristy}
+FunDiv <- diversity(EcoL_Func_M) %>% 
+  exp() %>%
+  data.frame(FuncDiv = .) %>% 
+  add_rownames(var = "ID") %>% 
+  mutate(Sampling = substr(ID, 1,3)) %>% 
+  mutate(BOT = as.integer(sub(".+_(\\d+)", "\\1", ID))) %>%
+  left_join(., ID) %>% 
+  mutate(Sampling = factor(Sampling, levels = c("Mid", "End")))
+``` 
+
+We clean the data frame and export the Functional diversity data.
+
+```{r write data}
+FunDiv <- select(FunDiv, Sampling, BOT, DIV, Tox, ToxC, FuncDiv)
+
+write.table(FunDiv, "Ecolog/FunDiv.txt", sep = "\t")
+
+```
+
+Finally, let's also have a quick look at the Functional diversity values that we calculated, by Lake and Sampling. 
+
+```{r plot functional diversity, echo = FALSE, fig.width= 10, fig.height=8}
+  ggplot(FunDiv, aes(x = DIV, y = FuncDiv, colour = Tox, shape = Sampling))+
+    geom_point(position = position_dodge(width = 0.4))+
+   # facet_wrap(~Sampling,  labeller = label_wrap_gen(multi_line = FALSE))+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5),
+        legend.position = "none")+
+    #scale_colour_manual(values = c("orange", "darkred", "darkgreen", "darkblue"  ))+
+    labs( y = "effective number of traits", x = "dilution factor", title = "functional diversity")
+  
+```
+
+
+### Comparing Model fit to Weibull model as in [REF](https://peerj.com/preprints/330v1/)
+
+Weibull model: $$ CorrOD = 1-exp(-exp(A+B*log(dhour, base = 10))) $$ 
+
+The results of both model fits are plotted together with the raw data as **Plate_fit.pdf**. 
+
+Below is one example, for plate 1 on the "mid" sampling. The Weibull model fit is shown in red, the Gompertz model fit in blue. 
+
+This example (and the plots for all other plates) show that in the majority of the cases, the Gompertz model fits the data more closely than the Weibull model. 
+
+The problem is that (as specified) the Weibull model has a hardcoded upper limit of `CorrOD` = 1. Changing this number or adding a third paramter instead, imporves the residual distribution but decreases the number of Wells that can't be modelled. 
+
+As the gompertz model fits the data closely and successfully models the vast majority of wells, I stick with it.
+
+
+```{r}
+# fit function to all Wells with positive reponse (start paramters are median parameters from first fit round)
+FitWeib <- EcoL0.2 %>%
+  group_by(Sampling, BOT, Wells, rep) %>%
+  do(weibull_fit = try(nlsLM( CorrOD ~ 1 - exp(-exp(A+B*log(dhour,10))),
+                        data = .,
+                        start = list(A = -21.6, B = 13),
+                        control = list(maxiter = 100)),
+                        silent = T))
+
+#compare to previous model fits
+FitNls.pre <- filter(FitNls, class(gompertz_fit) != "try-error") %>% 
+    augment(gompertz_fit)  
+            
+#newdata <- filter(FitNls, class(gompertz_fit) != "try-error") %>% expand(Sampling, BOT, Wells, rep, dhour=seq(1,62, 124))
+
+# predict
+FitNls.pre <- FitNls.pre %>% rename(fit_nls = .fitted, res_nls = .resid)
+
+#predict Weibull and join raw data + prvoups predicted model fits
+FITCOMP <- filter(FitWeib, class(weibull_fit) != "try-error") %>% 
+  augment(weibull_fit) %>% 
+  left_join(EcoL, .) %>% 
+  left_join(FitNls.pre)
+
+#plot as multipage pdf
+
+plotlist <- list()
+
+for (i in unique(FITCOMP$BOT)) {
+  for (n in c("Mid", "End")) {
+    plot1 <- FITCOMP %>% 
+    filter(BOT ==i, Sampling == n) %>% 
+    ggplot(., aes(x = dhour, y = CorrOD))+
+    geom_point(colour = "grey")+
+    geom_line(aes(x = dhour, y = .fitted), colour = "red", 
+              alpha = 0.8, size = 1)+
+    geom_line(aes(x = dhour, y = fit_nls), colour = "blue",
+              alpha = 0.6, size = 1)+
+    facet_wrap(~ Wells*rep,  labeller = label_wrap_gen(multi_line = FALSE), ncol = 9)+
+    labs(title = paste(paste("Bottle -", i), paste("Sampling -", n)))+
+    theme_bw()
+    
+    plotlist[[length(plotlist)+1]] <- plot1
+    
+  }}
+
+pdf("Plate_fit.pdf")
+invisible(lapply(plotlist, print))
+dev.off()
+  
+
+#plot an example here
+
+  FITCOMP %>% 
+    filter(BOT ==1, Sampling == "Mid") %>% 
+    ggplot(., aes(x = dhour, y = CorrOD))+
+    geom_point(colour = "grey")+
+    geom_line(aes(x = dhour, y = .fitted), colour = "red", 
+              alpha = 0.8, size = 1)+
+    geom_line(aes(x = dhour, y = fit_nls), colour = "blue",
+              alpha = 0.6, size = 1)+
+    facet_wrap(~ Wells*rep,  labeller = label_wrap_gen(multi_line = FALSE), ncol = 9)+
+    labs(title = "BOT - 1, Sampling - Mid")+
+    theme_bw()
+
+  
+# compare residuals
+  FITCOMP %>% 
+    select(BOT, .resid, res_nls) %>% 
+    gather(model, residuals, -BOT) %>% 
+    mutate(model = ifelse(model == ".resid", "Weibull", "Gompertz")) %>% 
+  ggplot(., aes(x = residuals))+
+    geom_histogram(binwidth = 0.01)+
+    facet_wrap(~model)+
+    labs(title = "residuals distributions")
+
+```
+
+
+
