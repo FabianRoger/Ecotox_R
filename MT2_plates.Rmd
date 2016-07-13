@@ -1,0 +1,514 @@
+---
+title: "Analysis of Ecolog plates"
+author: "Fabian Roger"
+date: "21 Jun 2016"
+output:
+  html_document:
+    fig_caption: yes
+    toc: yes
+  pdf_document:
+    latex_engine: lualatex
+    toc: yes
+---
+
+In this script I import and clean the data from the 
+Carbon Source Utilization Profiling using the BIOLOG™ Ecoplates
+
+
+
+__this script imports:__ 
+
++ MT2/MT2_reads.txt       # raw OD readings for all samples from Biolog EcoPlate
++ BOT_ID.txt              # sample metadata
+   
+__this script does:__
+
+  + quality control 
+  + bias correction
+  
+__this script exports:__
+  
+  data frames:
+  
+  
+```{r, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message=FALSE, echo = FALSE)
+```
+
+```{r load packages, echo = FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(broom)
+library(purrr)
+library(minpack.lm)
+library(magrittr)
+library(tidyr)
+library(flux)
+
+```
+
+
+```{r import data}
+MT2 <- read.table("MT2/MT2_reads.txt", stringsAsFactors = F)
+head(MT2)
+
+unique(MT2$Sampling)
+unique(MT2$set)
+sort(unique(paste(MT2$Sampling, MT2$Sample)), decreasing = T)
+```
+
+We used 4 differnt types of plates: `r sort(unique(MT2$set))`:
+
+[Plate layouts](~/Documents/01_PhD/01_Research/03_Ecotox/Ecotox_R/MT2/plate_layout.jpg)
+
+Code | Compound	|	Composition
+-----|----------|------------------------------------------------------------------------
+Blank |	Blank	|	50µl medium + 100 µl sterile MiliQ				
+Cont	| Control	|	50µl medium + 50 µl bacterial suspension + 50 µl sterile MiliQ				
+Para	| Paraquat	|	50µl medium + 50 µl bacterial suspension +Paraquat				
+NaCl	| Natrium Chloride	|	50µl medium + 50 µl bacterial suspension + 50 µl NaCl				
+Oflox	| Ofloxacin	|	50µl medium + 50 µl bacterial suspension + 50 µl Ofloxacin				
+SMX	| Sulfamethoxazole	|	50µl medium + 50 µl bacterial suspension + 50 µl Sulfamethoxazole				
+Cipro	| Ciprofloxacin	|	50µl medium + 50 µl bacterial suspension + 50 µl Ciprofloxacin				
+
+
+**Cipro 100**
+
++ contained only Ciprofloxacin (at a concentration of 100µM) and Blanks
++ each diversity level (1-5) was present in 10 replicates on the plate
+
+**control**
+
++ was the corresponding control plate
++ contained only controls and Blanks
++ each diversity level (1-5) was present in 10 replicates on the plate
++ we did 3 replicates of the control plate
+
+**set1**
+
++ contains Blank & Controls
++ duplicated concentration gradients of the antibiotic Ciprofloxacin
++ duplicated concentration gradients of the antibiotic Sulfamethoxazole
++ single concentration gradient of the control stress compound Nactrium Chloride
+
+**set2**
+
++ contains Blank & Controls
++ duplicated concentration gradients of the antibiotic Ofloxacin
++ duplicated concentration gradients of the herbicide Paraquat
++ single concentration gradient of the control stress compound Nactrium Chloride
+
+Not all treatments have been tested on all plates on both sampling occasions. We tested the following treatments on the following plates:
+
+Sampling | Treatment | n_rep | Plate
+---------|-----------|-------|------
+**Mid** | **Div1** | **1** | **set1**
+**Mid** | **Div1** | **1** | **set2**
+Mid | Div1 (1:10) | 1 | set1
+Mid | Div1 (1:10) | 1 | set2
+**Mid** | **Div3** | **1** | **set1**
+**Mid** | **Div3** | **1** | **set2**
+**Mid** | **Div5** | **1** | **set1**
+**Mid** | **Div5** | **1** | **set2**
+**End** | **Div1** | **9 (full gradient)** | **set1**
+**End** | **Div1** | **9 (full gradient)** | **set2**
+**End** | **Div5** | **9 (full gradient)** | **set1**
+**End** | **Div5** | **9 (full gradient)** | **set2**
+End | Div1 (?) | 1 | Cipro100
+End | Div1 (?) | 3 | control
+
+
+
+`MT2` has the following `r ncol(MT2)` columns: `r colnames(MT2)`
+
+`$Date` and `$Time` give the exact time point when the plate was read and `$Sampling` represents the two independent sampling points. The `$hour` column gives the nominal time point of the reading. The `$Sample`column says from which Sample the plates corresponds to. 
+
+First, we merge the date and time column and transform it into POSIXct format. We
+then proceed and add and `$dhour`column that gives the exact time difference
+(in hours) from the first to the last reading for each plate. 
+
+
+```{r check&prepare data4, echo=FALSE}
+MT2$Timepoint <- as.POSIXct( strptime( paste( MT2$Date, MT2$Time),"%Y-%m-%d %H:%M:%S"))
+
+MT2.list <- split(MT2, list(MT2$Sample, MT2$Sampling))
+
+MT2.list <- lapply(MT2.list, function(x) { x <-  x[with(x, order(hour)), ]
+x$dhour  <- (difftime( x$Timepoint[1], x$Timepoint, units = "hours")*-1) + x$hour[1]
+return(x) })
+
+MT2 <- do.call( rbind, MT2.list)
+
+MT2$dhour <- as.numeric(MT2$dhour)
+
+head(MT2[ ,c("Sample", "OD595", "dhour")], 1)
+tail(MT2[ ,c("Sample", "OD595", "dhour")], 1)
+
+```
+
+Let's look at this information to see when the plates have been read and how long they have been incubated.
+
+```{r check&prepare plot1, warning=FALSE, echo=FALSE}
+select(MT2, Sampling, Sample, hour, dhour) %>%
+  mutate(Sampling = factor(Sampling, levels = c("Mid", "End")), dhour = as.numeric(dhour)) %>%
+  distinct() %>%
+  
+  ggplot(aes(x = dhour, y = Sampling, colour = Sampling))+ 
+    geom_point(alpha = 0.6)+
+    geom_vline( aes(xintercept = hour, colour = Sampling), linetype = "dashed") +
+    theme_bw(base_size = 13)+
+    facet_wrap(~ Sampling, nrow = 2, scales = "free_y" )+
+    labs(x = "timepoint of sampling", y = "sampling occasion", title = "distribution of readings")+
+    theme(legend.position = "none")
+```
+
+We can see that the exact intervals match the nominal reading times very well. Maria did a great job there!
+
+We read the plates at three different ODs. `OD590`, `OD595` & `OD700` and calculate the corrected OD readings as decribed in 
+
+[Johansson H, Janmar L, Backhaus T. (2014) Toxicity of ciprofloxacin and sulfamethoxazole to marine periphytic algae and bacteria. PeerJ PrePrints 2:e330v1](https://doi.org/10.7287/peerj.preprints.330v1)
+
+> Calculation of the background color development bckgd, as the median of the three [**here** 4 / 36]
+wells without any added carbon source [**here** bacterial suspension] (blanks) per plate.
+Calculation of the color development (corrected absorbance, CorrOD) for each well that contained an added carbon source [**here** bacterial suspension] and for each Ecolog incubation time. This provides a measure of the total catabolic activity ~~per carbon source~~ and is calculated as the optical density at 595 nm (absorbance of the tetrazolium dye after oxidation) corrected for background and turbidity of the sample (absorbance at 700 nm): corrected optical density for each well as:
+CorrOD =(OD595 – OD700)-bckgd
+
+I calculate the background color development `bckgd` from the coorected blanks (OD595-OD700), too. 
+
+
+
+```{r calculate corrected OD, fig.height=10, fig.width=12}
+
+# calculate the corrected OD (OD595 - OD700)
+MT2 <- MT2 %>% 
+  mutate(CorrOD = OD595 - OD700)
+
+# calculate median blank for each plate at each reading
+Blanks <- MT2 %>% 
+  filter(Tox == "Blank") %>% 
+  select(Sampling, Sample, hour, CorrOD) %>% 
+  group_by(Sampling, Sample, hour) %>% 
+  summarise(bckgd = median(CorrOD))
+
+# substract (corrected) background colour dev. from corrected OD
+MT2 <- MT2 %>% 
+  filter(Tox != "Blank") %>% 
+  left_join(., Blanks) %>% 
+  mutate(CorrOD = CorrOD - bckgd)
+
+# define corrected ID values < 0 as 0
+MT2[MT2$CorrOD < 0, ]$CorrOD <- 0
+
+
+MT2 %>% filter(Sample == "Div5_set1_34") %>% 
+  ggplot(. , aes(y= OD595, x = dhour, colour = Wells))+
+  geom_line(linetype = "dashed")+
+  geom_line(aes(x = hour, y = CorrOD))+
+  theme_bw()+
+  facet_wrap(~Wells, labeller = label_wrap_gen(multi_line = FALSE), ncol = 10)+
+  labs(x = "time (hours)", title = "example MT2 plate (Cipro100, End)")+
+  theme(legend.position = "none")
+  
+```
+
+
+With the corrected OD vaues we will now compute two response variables. 
+
++ the maximum growth rate in each well on each plate. 
++ the area under the (fitted) curve (auc) in each well on each plate
+
+### median uptake rate of carbon sources
+
+To calculate the uptake rate of the carbon source, we fit a modified Gompertz
+model of the form:
+
+$$ OD = K*exp(-exp{(\frac{r*e}{K}*(l-t)+1)} $$
+
+where 
+
++ $r$ is the maximum slope
++ $K$ the maximum OD and 
++ $l$ the lag phase
+
+We then extract the $r$ parameter and take it as the **uptake rate** 
+
+Note that I use `nlsLM` from the `minpack.lm package to fit the gompertz function. It is much more efficient at fitting the wast majority of the samples than `nls`. 
+
+I only attempt to model wells that show some growth. I asses this by calculating the difference in `CorrOD`between the average of the first to datapoints and the average of the last two datapoints. Only Wells with a positive OD development (defined as a diffenece >= 0.01 OD units) are kept for the modelling.
+
+I model the wells in two rounds. In the first round we attempt to model all wells with a fixed set of starting paramters. Those wells that fail to be modelled, I first try to model with another set of starting parameters and the attempt to "brute-force" the fitting of the wells that still fail by looping through ~3000 starting parameter combinations for each well. 
+
+
+
+```{r model uptake rates}
+
+# select Wells with positive OD development
+ MT2_pos <- MT2 %>% 
+  group_by(Sampling, Sample, Wells) %>% 
+  arrange(dhour) %>% 
+  by_slice(function(x) {mean(x$CorrOD[length(x$CorrOD): length(x$CorrOD)-1]) - 
+                        mean(x$CorrOD[1:2]) }, 
+           .collate = "cols") %>% 
+  filter(.out >= 0.01) 
+
+MT2_pos <- MT2%>% select(Sampling, Sample, Wells, dhour, CorrOD) %>% semi_join(., MT2_pos)
+
+
+# fit function to all Wells with positive reponse
+FitNls <- MT2_pos %>%
+  group_by(Sampling, Sample, Wells) %>%
+  do(gompertz_fit = try(nlsLM( CorrOD ~ K * exp( -exp((( r * exp( 1)) / K) * (l - dhour) + 1)),
+                        data = .,
+                        start = list(K = 1.28, l = 44, r = 0.03),
+                        control = list(maxiter = 1024)),
+                        silent = T))
+
+
+# try to refit wells that failed at the first attempt with gentle brootforce #
+
+# datframe of start values
+Start <- data.frame(K = rep(seq(0,3,0.2), each = 210), 
+                    l = rep( rep( seq(0,120,20), each = 30), 16),
+                    r = rep( seq(0.01, 0.3, 0.01), 112))
+
+# which wells could not be fitted
+MT2_no_fit <- filter(FitNls, class(gompertz_fit) != "nls")
+
+# *positive* wells that were not fitted (raw data)
+MT2_pos_nf <- MT2_pos %>% select(Sampling, Sample, Wells, dhour, CorrOD) %>% 
+  semi_join(., MT2_no_fit) %>% group_by(Sampling, Sample, Wells) 
+
+# dataframe to store results
+Fit <- MT2_no_fit[0,]
+
+# first attempt to fit wells (with differnt set of start parameters)
+Fit_t <- MT2_pos_nf %>%  do(gompertz_fit = try(nlsLM( CorrOD ~ K * exp( -exp((( r * exp( 1)) / K) * (l - dhour) + 1)),
+                        data = .,
+                        start = list(K = 2, l = 40, r = 0.1),
+                        control = list(maxiter = 1024)),
+                        silent = T)) %>% 
+  filter(class(gompertz_fit) == "nls")
+
+Fit <- rbind(Fit,Fit_t)
+
+# brootforce remaining wells by looping through set of ~3000 start paramter combinations
+for (i in 1: nrow(Start)) {
+ Fit_t <-  anti_join(MT2_no_fit, Fit, by=c("Sampling", "Sample", "Wells")) %>% 
+  semi_join(MT2_pos, .) %>% group_by(Sampling, Sample, Wells) %>% 
+    do(gompertz_fit = try(nlsLM( CorrOD ~ K * exp( -exp((( r * exp( 1)) / K) * (l - dhour) + 1)),
+                        data = .,
+                        start = Start[i,],
+                        control = list(maxiter = 1024)),
+                        silent = T)) %>% 
+  filter(class(gompertz_fit) == "nls")
+  
+ Fit <- rbind(Fit,Fit_t)
+}
+
+FitNls <- FitNls %>% filter(class(gompertz_fit) == "nls") %>% mutate(fit = "1.trial")
+Fit <- mutate(Fit, fit = "bf")
+
+FitNls <- rbind(FitNls, Fit)
+```
+
+We attempted to model `r select(MT2_pos, Sampling, Sample, Wells) %>% distinct %>% nrow` out of `r select(MT2, Sampling, Sample, Wells) %>% distinct %>% nrow` Wells and the model converged in `r filter(FitNls, class(gompertz_fit) == "nls") %>% nrow` at the first attempt. `r filter(FitNls, class(gompertz_fit) != "nls") %>% nrow` did not converge at all.
+
+As rough quality control for the fits, we inspect the residuals. We calcualte the deviance as differnce in % of the mean predicted versus mean actual OD values and look at the % deviance for all models.
+
+```{r}
+
+FITgomp <- FitNls %>% 
+  augment(gompertz_fit) %>% 
+  left_join(MT2,.) %>% 
+  mutate(Sample_u = paste(Sample, Sampling))
+
+FITgomp %>% group_by(Sample, Sampling, Wells) %>% 
+  summarize(meanres = mean(abs(.resid)), meanOD = mean(CorrOD)) %>% 
+  mutate(dev = (meanres/meanOD)*100) %>% 
+  ggplot(aes(x = dev))+
+  geom_histogram(binwidth = 5)+
+  geom_vline(xintercept = 30, linetype = "dotted")+
+  scale_x_continuous(breaks = seq(0, 130, 5))+
+  labs(x = "deviance in %")
+
+DEV <- FITgomp %>% group_by(Sample, Sampling, Wells) %>% 
+  summarize(meanres = mean(abs(.resid)), meanOD = mean(CorrOD)) %>% 
+  mutate(dev = (meanres/meanOD)*100) %>% 
+  filter(dev >= 30) %>% 
+  mutate(dev = "≥30%")
+```
+
+The histogramm shows the distribution of the relative daviation of all wells. It shows that the vast majority are close fits (within ≤10%) with some clear outliers. We exclude wells that have a higher deviance than 30%.
+
+Plots of all wells (by plate) are printed to "MT2/MT2_Plate_fit_gompertz.pdf". The colour of the best fit line (based on the predicted values from the model fit) indicates whether the well was fitted in the first attempt or later, using broot force. The shape of the points indicates whether the % deviance was above or below 30%. 
+
+Visual inspection of the plots of all the wells show that this strategy successfully identifies very poor fits while keeping the others.
+
+```{r,  fig.height=10, fig.width=12}
+
+FITgomp <- left_join(FITgomp, DEV) %>% 
+  mutate(dev = ifelse(is.na(dev), "<30%", "≥30%")) 
+
+
+plotlist <- list()
+
+for (i in unique(FITgomp$Sample_u)) {
+    plot1 <- FITgomp %>% 
+    filter(Sample_u == i) %>% 
+    ggplot(., aes(x = dhour, y = CorrOD))+
+    geom_point(aes(shape = dev))+
+    geom_line(aes(x = dhour, y = .fitted, colour = fit), 
+              alpha = 0.8, size = 1)+
+    facet_wrap(~Wells,  labeller = label_wrap_gen(multi_line = FALSE), ncol = 10)+
+    labs(title = i)+
+    theme_bw()
+    
+    plotlist[[length(plotlist)+1]] <- plot1
+    
+  }
+
+#pdf("MT2/MT2_Plate_fit_gompertz.pdf")
+#invisible(lapply(plotlist, print))
+#dev.off()
+
+plotlist[[40]]
+```
+
+`r nrow(FitNls)` out of `r nrow(FitNls)` could be modeled successfully, with the help of bruteforce for `r nrow(Fit)`
+ models.  In total `r nrow(DEV)` wells were excluded.
+ 
+However, we also have to check the quality of the parameter estimates:
+
+```{r inspect successfull models, fig.width=6, fig.height=6, warning=FALSE}
+MT2Fit <- FitNls %>% tidy(gompertz_fit) %>% filter(term == "r") 
+  
+
+ggplot(MT2Fit, aes(x= estimate))+
+  geom_histogram(binwidth = 0.05)+
+  geom_histogram(data = filter(MT2Fit, p.value< 0.001), aes(x = estimate), fill = "red", alpha = 0.6, binwidth = 0.05)+
+  theme_bw()+
+  scale_y_sqrt()+
+  labs(title = "histogramm of all paramter estimates, bin = 0.05\nred represents signifcant parameter estimates (p < 0.001)", y = "sqrt(counts)")
+
+  
+```
+
+We see that the bulk of estimates is in a rather narrow range with `0 ≤ r ≤ 0.1`  but some estimators fall (way) outside this range. To avoid biases from outliers in the estimation of functional diversity without needing to exclude too much data, we adopt the following approach:
+
++ Wells that we defined as positive (see above) but which were excluded (see above) are set as missing value
++ All other wells get either set to `r` = 0 (if we scored them as negative) or with the estimated `r`
++ we truncate the estimated `r` at `0 ≤ r ≤ max(r.sig)` where `r.sig` denotes the parameter estimates of `r` with a `p.value ≤ 0.001`
+
+This second step takes the good estimates to make a qualified guess about a realistic range of `r` values and prevents the influence of outliers.
+
+According to our definition **we score those wells as positive, where the average OD at the last two measurements is at leats 0.01 higher than the average OD of the first two measurements**. 
+
+
+We go back to the full data set and 
+
++ define the `r`for all wells with no apparent growth as 0
++ join the estimated `r` for all other wells
++ filter out the wells with a % deviance of ≥ 30%
++ truncate the very high r estimates 
+
+
+```{r filter and join data}
+
+MaxR <- filter(MT2Fit, p.value <= 0.001) %>% #defining maximum r value after which we truncate
+  ungroup %>% 
+  summarize(., r = max(estimate))
+```
+
+`max_r` : `r MaxR`
+
+```{r}
+# all Wells
+MT2_r <- MT2 %>% select(Sample, Sampling, Wells, Tox, Conc, Unit, Treatment) %>% distinct
+
+MT2_r <- MT2Fit %>% ungroup %>% select(Sample, Sampling, Wells, estimate) %>% # positive wells
+  rename(rmax = estimate) %>% 
+  left_join(MT2_r, .) %>% # join estimated r
+  mutate(rmax = ifelse(is.na(rmax), 0, rmax)) %>% # define all wells that didn#t score as positive as r = 0
+  anti_join(., DEV) %>% # excluded wells that had too large deviation
+  mutate(rmax = replace(rmax, rmax > MaxR$r, MaxR$r)) # truncate all estimates > MaxR at MaxR
+
+MT2_r %>% 
+  ggplot(aes(x = rmax))+
+  geom_histogram(binwidth = 0.001)
+
+
+head(MT2_r)
+
+
+```
+
+### Area under the curve
+
+We also calculate the area under the curve for all wells that we succsessfully modelled (And kept after data cleaning, see above)
+
+
+For that we 
+
++ smooth the fitted curves by predicting on hourly data, in the range 0 -124h
++ calculate the area under the curve for the predicted data, using the `auc` function from the `flux` package. between the predicted points, the function interpolates linarly and subdivides the segment in 100 sub-segments.
++ keep auc estimates for all wells for which we also kept an rmax estimate
+
+```{r,  fig.height=10, fig.width=12}
+
+PRED <- function(x){ # defining function to predict with fitted values 
+  fit <- predict(x$gompertz_fit[[1]], newdata = data.frame(dhour = seq(0,124,1)))
+  DF <- data.frame(Sampling = x$Sampling,
+                   Sample = x$Sample,
+                   Wells = x$Wells,
+                   dhour = seq(0,124,1),
+                   fit = fit)
+  return(DF)
+}
+
+Fit.list <- FitNls %>% anti_join(DEV) %>% split(1:NROW(.)) # split FitNls into list 
+
+pred.list <- lapply(Fit.list, PRED) # predict each model with extended x-values
+
+Fit.pred <- bind_rows(pred.list) %>% # rbind as data.frame
+  mutate(Sample_u = paste(Sample, Sampling))
+
+filter(Fit.pred, Sample_u =="Kontroll3 End") %>% 
+  ggplot()+
+  geom_line(aes(x = dhour, y = fit))+
+  geom_ribbon(aes(x = dhour, ymin = 0, ymax = fit), alpha = 0.4, fill = "blue")+
+  geom_point(data = filter(FITgomp, Sample_u =="Kontroll3 End"), aes(x = dhour, y = CorrOD))+
+  facet_wrap(~Wells)+
+  theme_bw()+
+  labs(y = "CorrOD / fitted values", title = "Kontroll3 End - area under the curve")
+
+
+# calculate area under the curve
+Fit_auc <- Fit.pred %>% group_by(Sampling, Sample, Wells) %>% summarise(auc = auc(x = dhour, y = fit))
+
+#join to MT2_r so that only Wells defined as positive there are taken into account. 
+MT2_rmax_auc <- left_join(MT2_r, Fit_auc) %>% mutate(auc = ifelse(is.na(auc), 0, auc))
+
+ggplot(MT2_rmax_auc, aes(x = auc))+
+  geom_histogram(binwidth = 1)+
+  labs(title = "histogramm of estimated area under the curve values")
+
+ggplot(MT2_rmax_auc, aes(x = auc, y =rmax))+
+  geom_point()
+  
+
+
+
+head(MT2_rmax_auc)
+```
+
+
+export the MT2 data
+
+```{r, eval=F}
+  write.table(MT2_rmax_auc, "MT2/MT2_plates.txt", sep = "\t")
+```
+
+
+
+
