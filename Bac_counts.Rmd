@@ -1,0 +1,145 @@
+---
+title: "Bacterial cell counts"
+author: "Fabian Roger"
+date: "21 Jun 2016"
+output:
+  html_document:
+    fig_caption: yes
+    toc: yes
+  pdf_document:
+    latex_engine: lualatex
+    toc: yes
+---
+
+In this script I import and clean the data from the 
+Carbon Source Utilization Profiling using the BIOLOG™ Ecoplates
+
+
+
+__this script imports:__ 
+
++ Ecolog/BacCounts.txt      # raw Flow Cyto data
++ BOT_ID.txt                # sample metadata
+   
+__this script does:__
+
+  + quality control 
+  + bias correction
+  
+__this script exports:__
+  
+  data frames:
+  
+  
+```{r, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message=FALSE)
+```
+
+```{r load packages, echo = FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+
+```
+
+
+```{r, load data}
+Bac <- read.table("BacCounts.txt" , header = T , sep = "\t")
+ID <- read.table("ID.txt")
+
+ID <- mutate(ID, bot_label = paste(tolower(Sampling), formatC(BOT, width = 2, flag = 0), sep = "-"))
+
+```
+
+
+! for Tox 0 the Botlle number doesn't seem to correspond to the right cell numbers. Check! 
+
+(see e.g. ` r Bac %>% filter(sampling == ymd("2013-10-20"), DIV == 1, Tox == 0) %>% arrange(sampling, Cells, BOT))` to see what I mean)
+
+```{r}
+# transform $sampling into POSIXct date
+Bac$sampling <- dmy(Bac$sampling)
+
+# add with / without tox level
+Bac <- mutate(Bac, ToxYN = ifelse(sampling < ymd(20131010), "NO", "YES"))
+
+
+# melt to long format
+
+Bac <- gather(Bac, Cells, Counts, CellsL, CellsD, CellsT)
+
+Bac$Cells <- factor(Bac$Cells, levels=c("CellsT","CellsL","CellsD"))
+
+# plot Cell counts by diversity and Tox
+
+Bac %>% filter(DIV != "S") %>% 
+  ggplot(., aes(x = sampling, y=Counts, colour=Cells))+
+  facet_wrap(~DIV * ToxC,ncol=7, labeller = label_wrap_gen(multi_line = F))+
+  geom_point(position = position_jitter(width = 0.2))+
+  geom_vline(xintercept = as.numeric(ymd("2013-10-10")), linetype = "dashed")+
+  stat_summary(geom = "line", fun.y = "mean")+
+  theme_bw()+
+  scale_colour_manual(values=c("darkgreen","darkred","darkblue"))+
+  theme(axis.text.x=element_text(angle=45,hjust = 1, vjust = 1 ))+
+  scale_x_date(breaks = unique(Bac$sampling)[seq(1 , length(unique(Bac$sampling)), 2)])
+
+```
+
+plot cell counts relative to 0
+
+```{r}
+
+
+AWCD_cont <- 
+  AWCD %>% 
+  filter(Tox == 0) %>% 
+  ungroup() %>% 
+  group_by(Sampling, DIV, dhour) %>% 
+  summarise( AWCD = median(AWCD)) %>% 
+  spread(Sampling, AWCD) %>% 
+  rename(Cont_Mid = Mid,
+         Cont_End = End)
+    
+
+
+AWCD %>% 
+  filter(Tox != 0) %>% 
+  ungroup() %>% 
+  spread(Sampling, AWCD) %>% 
+  left_join(AWCD_cont) %>% 
+  mutate(AWCD_inhib = 100 - 100 * (End / Cont_End) * (Cont_Mid / Mid)) %>% 
+  #filter(DIV != 1) %>% 
+  ggplot(., aes(x = ToxC, y = AWCD_inhib))+
+  geom_point(shape = 21, colour = "darkblue")+
+  geom_hline(aes(yintercept = 0), linetype = "dashed")+
+  facet_grid(dhour ~ DIV, scales = "free")+
+  scale_x_log10(breaks = signif(unique(ID$ToxC), 2))+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = -45, hjust = 0))
+
+
+
+
+filter(Bac_inhib, Cells == "CellsT") %>% 
+ggplot(., aes(x = ToxC, y=prct_inhib))+
+  facet_grid(DIV ~ sampling, labeller = label_wrap_gen(multi_line = F), scales = "free_y")+
+  geom_point(position = position_jitter(width = 0.2), colour = "darkgreen")+
+  geom_line(colour = "darkgreen")+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  theme_bw()+
+  theme(axis.text.x=element_text(angle=45,hjust = 1, vjust = 1 ))+
+  scale_x_log10(breaks = unique(Bac_inhib$ToxC))
+
+filter(Bac_inhib, Cells == "CellsL") %>% 
+ggplot(., aes(x = ToxC, y=prct_inhib))+
+  facet_grid(DIV ~ sampling, labeller = label_wrap_gen(multi_line = F), scales = "free_y")+
+  geom_point(position = position_jitter(width = 0.2), colour = "darkred")+
+  geom_line(colour = "darkred")+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  theme_bw()+
+  theme(axis.text.x=element_text(angle=45,hjust = 1, vjust = 1 ))+
+  scale_x_log10(breaks = unique(Bac_inhib$ToxC))
+
+```
+
