@@ -1,0 +1,636 @@
+---
+title: "MT2 Analysis"
+author: "Fabian Roger"
+date: "21 Jun 2016"
+output:
+  html_document:
+    fig_caption: yes
+    toc: yes
+  pdf_document:
+    latex_engine: lualatex
+    toc: yes
+---
+
+In analyse the data from the MT2 assays
+
+__this script imports:__ 
+
++ MT2/MT2_auc.txt       # corrected OD readings and model paramater estimates and area under the curve estimates for the MT2 data
++ BOT_ID.txt              # sample metadata
+   
+__this script does:__
+
+  
+  
+  
+__this script exports:__
+
++ Ecolog/FunDiv.txt
+  
+  
+  
+```{r, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message=FALSE, echo=FALSE)
+```
+
+```{r load packages, echo = FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(broom)
+library(magrittr)
+library(tidyr)
+library(phyloseq)
+library(vegan)
+library(knitr)
+```
+
+
+Import data
+```{r}
+MT2 <- read.table("MT2/MT2_auc.txt", stringsAsFactors = FALSE)
+ID <- read.table("ID.txt")
+DIV <- read.table("Sequence_Analyis/DIV.txt")
+```
+We used 4 differnt types of plates: `r sort(unique(MT2$set))`:
+
+![Plate  layouts](MT2/plate_layout.jpeg)
+            
+
+Code | Compound	|	Composition
+-----|----------|------------------------------------------------------------------------
+Blank |	Blank	|	50µl medium + 100 µl sterile MiliQ				
+Cont	| Control	|	50µl medium + 50 µl bacterial suspension + 50 µl sterile MiliQ				
+Para	| Paraquat	|	50µl medium + 50 µl bacterial suspension +Paraquat				
+NaCl	| Natrium Chloride	|	50µl medium + 50 µl bacterial suspension + 50 µl NaCl				
+Oflox	| Ofloxacin	|	50µl medium + 50 µl bacterial suspension + 50 µl Ofloxacin				
+SMX	| Sulfamethoxazole	|	50µl medium + 50 µl bacterial suspension + 50 µl Sulfamethoxazole				
+Cipro	| Ciprofloxacin	|	50µl medium + 50 µl bacterial suspension + 50 µl Ciprofloxacin				
+
+
+**Cipro 100**
+
++ contained only Ciprofloxacin (at a concentration of 100µM) and Blanks
++ each diversity level (1-5) was present in 10 replicates on the plate
+
+**control**
+
++ was the corresponding control plate
++ contained only controls and Blanks
++ each diversity level (1-5) was present in 10 replicates on the plate
++ we did 3 replicates of the control plate
+
+**set1**
+
++ contains Blank & Controls
++ duplicated concentration gradients of the antibiotic Ciprofloxacin
++ duplicated concentration gradients of the antibiotic Sulfamethoxazole
++ single concentration gradient of the control stress compound Nactrium Chloride
+
+**set2**
+
++ contains Blank & Controls
++ duplicated concentration gradients of the antibiotic Ofloxacin
++ duplicated concentration gradients of the herbicide Paraquat
++ single concentration gradient of the control stress compound Nactrium Chloride
+
+Not all treatments have been tested on all plates on both sampling occasions. We tested the following treatments on the following plates:
+
+Sampling | Treatment | n_rep | Plate
+---------|-----------|-------|------
+**Mid** | **Div1** | **1** | **set1**
+**Mid** | **Div1** | **1** | **set2**
+Mid | Div1 (1:10) | 1 | set1
+Mid | Div1 (1:10) | 1 | set2
+**Mid** | **Div3** | **1** | **set1**
+**Mid** | **Div3** | **1** | **set2**
+**Mid** | **Div5** | **1** | **set1**
+**Mid** | **Div5** | **1** | **set2**
+**End** | **Div1** | **9 (full gradient)** | **set1**
+**End** | **Div1** | **9 (full gradient)** | **set2**
+**End** | **Div5** | **9 (full gradient)** | **set1**
+**End** | **Div5** | **9 (full gradient)** | **set2**
+End | Div1 (?) | 1 | Cipro100
+End | Div1 (?) | 3 | control
+
+
+
+## Mid-term sampling 
+
+We analyse the data collected at the "mid" sampling (after the regrowth phase but before the addition of toxins)
+
+At the mid sampling we analysed one bottle from three diversity samplings respectively:
+
++ Div1
++ Div2
++ Div3
+
+each on two version of the MT2 plates, including a total of 5 *challange substances*, each in duplicates and in concentration gradients of length 12. 
+![set1](MT2/MT2_set1.jpeg)
+![set2](MT2/MT2_set2.jpeg)
+
++ Ciprofloxacin (antibiotic)
++ Sulfamethoxazole (antibiotic)
++ Ofloxacin (antibiotic)
++ Paraquat (herbicide)
++ Natrium Chloride 
+
+
+### AUC
+
+Area-under-the-curve values for control and five challange substance along the challange substance concnetration gradient
+**Mid-time-sampling**. Five challange substances, 3 diveristy levels. 
+
+The control has a concentration of 0 but is shown at 0.001 to fit on log scale.
+
+Diveristy level 1 was tested twice, once inuculated undiluted, once with inoculated as a 1:10 dilution. 
+
+```{r}
+  MT2_mid <-  
+  MT2 %>% 
+  filter(Sampling == "Mid") %>% 
+  filter(Tox != "Blank") %>% 
+  mutate(DIV = substr(Sample, 4, 4)) %>% 
+  mutate(Sample = ifelse(grepl("1-10", Sample), "1-10", "1")) %>% 
+  mutate(Tox = factor(Tox, levels = levels(as.factor(.$Tox))[c(2,1,3:7)])) %>% 
+  select(DIV, Tox, Conc, auc, Sample, Wells) %>% 
+  distinct()
+
+  MT2_mid %>%
+    #filter(Tox == "Cont") %>% 
+ # mutate(row = substr(Wells, 1,1)) %>% 
+  mutate(Conc = ifelse(is.na(Conc), 0.01, Conc)) %>% 
+  ggplot(aes(x = Conc, y = auc))+
+  geom_point(shape = 21, alpha = 0.8)+
+  geom_smooth(se = F, size = 0.6)+
+  facet_grid(DIV~Tox, scales = "free")+
+  scale_x_log10()+
+  theme_bw()+
+  labs(title = "AUC values for MT2 plates - mid-time sampling")
+  #scale_color_manual(values = c("darkgreen", "darkblue"))
+  
+```
+
+### % inhibition
+
+Inhibition is calculated as $$ Inhibition = 100 - {\frac{AUC_{Effect}}{AUC_{Control}}}*100 $$
+
+were $$AUC_{Control} = median(AUC_{Control})$$
+
+
+```{r}
+  
+MT2_mid_oT <-  filter(MT2_mid, Tox != "Cont") # filter out Controls
+  
+MT2_mid_cont <- filter(MT2_mid, Tox == "Cont") %>% 
+  group_by(DIV, Sample) %>% 
+  summarise(cont_auc = median(auc)) 
+  
+MT2_mid_oT <- MT2_mid_oT %>% 
+  left_join(MT2_mid_cont) %>%
+  mutate(auc_inhib = 100 - (auc/cont_auc)*100)
+
+  
+ggplot(MT2_mid_oT, aes(x = Conc, y = auc_inhib, colour = Sample))+
+  geom_point(shape = 21, alpha = 0.8)+
+  facet_grid(DIV ~ Tox, scales = "free", 
+             labeller = label_wrap_gen(multi_line = FALSE))+
+  scale_x_log10()+
+  stat_smooth(se = F, size = 0.6)+
+  theme_bw()+
+  geom_hline(yintercept = 0)+
+  theme(axis.text.x = element_text(angle = -45))+
+  labs(y = "% inhibition from median control")+
+  scale_color_manual(values = c("darkgreen", "darkblue"))
+    
+```
+
+### Weibull fit
+
+we fit a Weibull function to concentration effect curves
+
+$$ \frac{Inhibition}{100} = 1-e^{-e^{(A + B * log(Conc)}} $$
+
++ I exclude the lowest concentration for all dose-response curves as the initial drop does not reflect the effect of the toxin and will prevent a good fit. 
+
+```{r}
+FitWeibull <- 
+MT2_mid_oT %>% 
+  mutate(auc_inhib = auc_inhib/100) %>% 
+  group_by(Tox) %>%
+  filter(Conc > min(Conc)) %>% 
+  filter(auc_inhib > -100) %>% 
+  group_by(DIV, Tox, Sample) %>% 
+  do(Weibull_fit = try(nlsLM( auc_inhib ~ 1-exp(-exp(A+B*log(Conc, base = 10))),
+                        data = .,
+                        start = list(A = -1.5, B = 4.4),
+                        control = list(maxiter = 1024)),
+                        silent = T))
+
+
+FitWeibull %>% 
+  filter(class(Weibull_fit) != "try-error") %>% 
+  augment(Weibull_fit) %>% 
+  select(-auc_inhib) %>% 
+  mutate(.fitted = 100 * .fitted) %>% 
+  left_join(MT2_mid_oT, . ) %>% 
+  ggplot(aes(x = Conc, y = auc_inhib, colour = Sample))+
+  geom_point(shape = 21, alpha = 0.8)+
+  facet_grid(DIV ~ Tox, scales = "free", 
+             labeller = label_wrap_gen(multi_line = FALSE))+
+  geom_line(aes(x = Conc, y = .fitted)) +
+  scale_x_log10() +
+  theme_bw()+
+  geom_hline(yintercept = 0)+
+  theme(axis.text.x = element_text(angle = -45))+
+  labs(y = "% inhibition from median control")+
+  scale_color_manual(values = c("darkgreen", "darkblue"))
+  
+ 
+```
+
+### Hill fit
+
+alternatively we fit a Hill function to concentration effect curves
+
+$$ Inhibition = a + \frac{b-a}{ 1 + (\frac{c}{Conc})^d } $$
+
++ I exclude the lowest concentration for all dose-response curves as the initial drop does not reflect the effect of the toxin and will prevent a good fit. 
+
+```{r}
+FitHill <- 
+MT2_mid_oT %>% 
+  group_by(Tox) %>%
+  filter(Conc > min(Conc)) %>% 
+  filter(auc_inhib > -100) %>% 
+  group_by(DIV, Tox, Sample) %>% 
+   do(Hill_fit = try(nlsLM( auc_inhib ~ a + ( ( b-a) / ( 1 + ( c/Conc)^d )),
+                        data = .,
+                        start = list(a = 0, b = 100, c = 1.4, d = 1),
+                        control = list(maxiter = 1024)),
+                        silent = T))
+
+FitHill %>% 
+  filter(class(Hill_fit) != "try-error") %>% 
+  augment(Hill_fit) %>% 
+  select(-auc_inhib) %>% 
+  left_join(MT2_mid_oT, . ) %>% 
+  ggplot(aes(x = Conc, y = auc_inhib, colour = Sample))+
+  geom_point(shape = 21, alpha = 0.8)+
+  facet_grid(DIV ~ Tox, scales = "free", 
+             labeller = label_wrap_gen(multi_line = FALSE))+
+  geom_line(aes(x = Conc, y = .fitted)) +
+  scale_x_log10() +
+  theme_bw()+
+  geom_hline(yintercept = 0)+
+  theme(axis.text.x = element_text(angle = -45))+
+  labs(y = "% inhibition from median control")+
+  scale_color_manual(values = c("darkgreen", "darkblue"))
+  
+ 
+```
+
+
+### calculate EC 10 50 and 90
+
++ for the Weibull Models
+
+we (WolframAlpha) can solve the Weibull equation for x which yields
+
+$$Conc = (-exp^{-A} * log(1 - Inhibition))^{\frac{log(10)}{B}} $$
+```{r}
+
+# function to find the concentration triggering any given effect
+Solve_Weibull <- function(Y,A,B) {
+  (-exp(-A) * log(1-Y))^(log(10)/B)
+}
+
+EC_Weibull <- 
+FitWeibull %>% 
+  filter(class(Weibull_fit) != "try-error") %>% 
+  tidy(Weibull_fit) %>% 
+  select(DIV,Tox, Sample, term, estimate) %>% 
+  spread(term,estimate) %>% 
+  mutate(EC_10 = Solve_Weibull(0.1, A, B)) %>% 
+  mutate(EC_50 = Solve_Weibull(0.5, A, B)) %>% 
+  mutate(EC_90 = Solve_Weibull(0.9, A, B))
+
+
+
+FitWeibull %>% 
+  filter(class(Weibull_fit) != "try-error") %>% 
+  augment(Weibull_fit) %>% 
+  select(-auc_inhib) %>% 
+  mutate(.fitted = 100 * .fitted) %>% 
+  left_join(MT2_mid_oT, . ) %>% 
+  ggplot(aes(x = Conc, y = auc_inhib, colour = Sample))+
+  geom_point(shape = 21, alpha = 0.8)+
+  facet_grid(DIV ~ Tox, scales = "free", 
+             labeller = label_wrap_gen(multi_line = FALSE))+
+  geom_line(aes(x = Conc, y = .fitted)) +
+  geom_vline(data = EC_Weibull, aes(xintercept = EC_10), colour = "green", size = 0.5, linetype = "dashed")+
+  geom_vline(data = EC_Weibull, aes(xintercept = EC_50), colour = "orange", size = 0.5, linetype = "dashed")+
+  geom_vline(data = EC_Weibull, aes(xintercept = EC_90), colour = "red", size = 0.5, linetype = "dashed")+
+  scale_x_log10() +
+  theme_bw()+
+  geom_hline(yintercept = 0)+
+  theme(axis.text.x = element_text(angle = -45))+
+  labs(y = "% inhibition from median control")+
+  scale_color_manual(values = c("darkgreen", "darkblue"))+
+  labs(title = "Weibull fit with EC_10, EC_50 & EC_90 values")
+```
+
+
++ for the Hill Models
+
+we (WolframAlpha) can solve the Hill equation for x which yields
+
+$$Conc = c * (\frac{Inhibition-b}{a-Inhibition})^{-\frac{1}{d}}$$
+```{r}
+
+# function to find the concentration triggering any given effect
+Solve_Hill <- function(Y,a,b,c,d) {
+  c * ((Y-b)/(a-Y))^-(1/d)
+}
+
+EC_Hill <- 
+FitHill %>% 
+  filter(class(Hill_fit) != "try-error") %>% 
+  tidy(Hill_fit) %>% 
+  select(DIV,Tox, Sample, term, estimate) %>% 
+  spread(term,estimate) %>% 
+  mutate(EC_10 = Solve_Hill(10, a, b, c, d)) %>% 
+  mutate(EC_50 = Solve_Hill(50, a, b, c, d)) %>% 
+  mutate(EC_90 = Solve_Hill(90, a, b, c, d))
+
+
+
+FitHill %>% 
+  filter(class(Hill_fit) != "try-error") %>% 
+  augment(Hill_fit) %>% 
+  select(-auc_inhib) %>%
+  left_join(MT2_mid_oT, . ) %>% 
+  ggplot(aes(x = Conc, y = auc_inhib, colour = Sample))+
+  geom_point(shape = 21, alpha = 0.8)+
+  facet_grid(DIV ~ Tox, scales = "free", 
+             labeller = label_wrap_gen(multi_line = FALSE))+
+  geom_line(aes(x = Conc, y = .fitted)) +
+  geom_vline(data = EC_Hill, aes(xintercept = EC_10), colour = "green", size = 0.5, linetype = "dashed")+
+  geom_vline(data = EC_Hill, aes(xintercept = EC_50), colour = "orange", size = 0.5, linetype = "dashed")+
+  geom_vline(data = EC_Hill, aes(xintercept = EC_90), colour = "red", size = 0.5, linetype = "dashed")+
+  scale_x_log10() +
+  theme_bw()+
+  geom_hline(yintercept = 0)+
+  theme(axis.text.x = element_text(angle = -45))+
+  labs(y = "% inhibition from median control")+
+  scale_color_manual(values = c("darkgreen", "darkblue"))+
+  labs(title = "Hill fit with EC_10, EC_50 & EC_90 values")
+```
+
++comparision of EC_X values
+
+```{r}
+EC_Hill <- 
+EC_Hill %>% 
+  select(-a, -b, -c, -d) %>% 
+  gather(EC, value, -DIV, -Tox, -Sample) %>% 
+  mutate(method = "Hill")
+
+EC_Weibull <- 
+EC_Weibull %>% 
+  select(-A, -B) %>% 
+  gather(EC, value, -DIV, -Tox, -Sample) %>% 
+  mutate(method = "Weibull")
+
+
+EC <- rbind(EC_Hill, EC_Weibull) %>% 
+  spread(method, value) 
+  
+ggplot(EC, aes(Hill, Weibull, colour = EC))+
+  geom_point()+
+  geom_smooth(se = F, method = "lm")+
+  scale_x_log10()+
+  scale_y_log10()+
+  labs(titel = "EC_X values, Weibull vs Hill")
+```
+
+
+## End sampling 
+
+We analyse the data collected at the "end" sampling (after the long-term exposure (1 week) to ciprofloxacin)
+
+At the end sampling we analysed the full toxicity gradient for two diversity levels:
+
++ Div1
++ Div5
+
++ Control (3x)
++ Tox levels 1-6
+
+each on two version of the MT2 plates identical to the ones described above.
+
+###AUC
+
+Area-under-the-curve values for control and five challange substance along the challange substance concentration gradient
+**End-time-sampling**. Five challange substances, 2 diveristy levels 6 Toxicity levels. 
+
+The control has a concentration of 0 but is shown at 0.001 to fit on log scale.
+
+```{r, fig.width=10, fig.height=10}
+  
+MT2_end <- 
+  MT2 %>% 
+  filter(Sampling == "End", 
+         ! grepl("Kontroll", Sample), 
+         Sample != "Cipro100") %>% 
+  filter(Tox != "Blank") %>% 
+  mutate(DIV = substr(Sample, 4, 4),
+         BOT = as.integer(sub(".+_.+_(\\d)", "\\1", Sample))) %>%
+  select(DIV, BOT, Tox, Conc, auc) %>% 
+  distinct() %>% 
+  rename(Substance = Tox) %>% 
+  left_join(., filter(ID, Sampling == "End")) 
+
+MT2_end %>% 
+  mutate(Conc = ifelse(is.na(Conc), 0.01, Conc)) %>% 
+  mutate(Substance = factor(Substance, levels = levels(as.factor(Substance))[c(2,1,3:7)])) %>% 
+  ggplot(aes(x = Conc, y = auc, colour = DIV))+
+  geom_point(shape = 21, alpha = 0.8, position = position_dodge(width = 0.2))+
+  geom_smooth(se = F, size = 0.6)+
+  facet_grid(ToxC~Substance)+
+  scale_x_log10()+
+  theme_bw()+
+  labs(title = "AUC values for MT2 plates - end-time sampling")+
+  scale_color_manual(values = c("darkgreen", "darkblue"))
+```
+
+
+### % inhibition
+
+Inhibition is calculated as $$ Inhibition = 100 - {\frac{AUC_{Effect}}{AUC_{Control}}}*100 $$
+
+were $$AUC_{Control} = median(AUC_{Control})$$
+
+```{r, fig.width= 10, fig.height=8}    
+
+MT2_end_oT <-  filter(MT2_end, Substance != "Cont") # filter out Controls
+  
+MT2_end_cont <- MT2_end %>% 
+  filter(Substance == "Cont") %>% 
+  group_by(BOT) %>% 
+  summarise(cont_auc = median(auc)) 
+
+MT2_end_oT<- MT2_end_oT %>% 
+  filter(Substance != "Cont") %>% 
+  left_join(MT2_end_cont) %>% 
+  mutate(auc_inhib = 100 - (auc/cont_auc)*100)
+
+
+MT2_end_oT %>% 
+  filter(auc_inhib > -100) %>% 
+  ggplot(aes(x = Conc, y = auc_inhib, colour = DIV))+
+  geom_point(shape = 21, alpha = 0.8, position = position_dodge(width = 0.2))+
+  geom_hline(aes(yintercept = 0), size = 0.5, linetype = "dashed")+
+  geom_smooth(se = F, size = 0.6, aes(group = BOT))+
+  facet_grid(Tox~Substance, scales = "free")+
+  scale_x_log10()+
+  theme_bw()+
+  #labs(title = "AUC values for MT2 plates - end-time sampling")+
+  scale_color_manual(values = c("darkgreen", "darkblue"))
+
+
+    
+```
+
+### Weibull fit
+
+we fit a Weibull function to concentration effect curves
+
+$$ \frac{Inhibition}{100} = 1-e^{-e^{(A + B * log(Conc)}} $$
+
++ I exclude the lowest concentration for all dose-response curves as the initial drop does not reflect the effect of the toxin and will prevent a good fit. 
+
+```{r, fig.width= 10, fig.height=8}    
+FitWeibull_end <- 
+MT2_end_oT %>% 
+  mutate(auc_inhib = auc_inhib/100) %>% 
+  group_by(Substance, BOT) %>%
+  filter(Conc > min(Conc)) %>% 
+  filter(auc_inhib > -100) %>% 
+  do(Weibull_fit = try(nlsLM( auc_inhib ~ 1-exp(-exp(A+B*log(Conc, base = 10))),
+                        data = .,
+                        start = list(A = -1.5, B = 4.4),
+                        control = list(maxiter = 1024)),
+                        silent = T))
+
+
+FitWeibull_end %>% 
+  filter(class(Weibull_fit) != "try-error") %>% 
+  augment(Weibull_fit) %>% 
+  select(-auc_inhib) %>% 
+  mutate(.fitted = 100 * .fitted) %>% 
+  left_join(MT2_end_oT, . ) %>% 
+  filter(auc_inhib > -100) %>% 
+ # filter(Tox == 0) %>% 
+  ggplot(aes(x = Conc, y = auc_inhib, colour = DIV))+
+  geom_point(shape = 21, alpha = 0.8)+
+  geom_line(aes(x = Conc, y = .fitted, group = BOT)) +
+  geom_hline(aes(yintercept = 0), size = 0.5, linetype = "dashed")+
+  facet_grid(Tox~Substance, scales = "free")+
+ # facet_grid(BOT~Substance, scales = "free")+
+  scale_x_log10()+
+  theme_bw()+
+  #labs(title = "AUC values for MT2 plates - end-time sampling")+
+  scale_color_manual(values = c("darkgreen", "darkblue"))
+  
+ 
+```
+
+### Hill fit
+
+alternatively we fit a Hill function to concentration effect curves
+
+$$ Inhibition = a + \frac{b-a}{ 1 + (\frac{c}{Conc})^d } $$
+
++ I exclude the lowest concentration for all dose-response curves as the initial drop does not reflect the effect of the toxin and will prevent a good fit. 
+
+```{r, fig.width= 10, fig.height=8} 
+FitHill_end <- 
+MT2_end_oT %>%
+  group_by(Substance, BOT) %>%
+  filter(Conc > min(Conc)) %>% 
+  filter(auc_inhib > -100) %>% 
+  do(Hill_fit = try(nlsLM( auc_inhib ~ a + ( ( b-a) / ( 1 + ( c/Conc)^d )),
+                        data = .,
+                        start = list(a = 0, b = 100, c = 1.4, d = 1),
+                        control = list(maxiter = 1024)),
+                        silent = T))
+
+FitHill_end %>% 
+  filter(class(Hill_fit) != "try-error") %>% 
+  augment(Hill_fit) %>% 
+  select(-auc_inhib) %>% 
+  left_join(MT2_end_oT, . ) %>% 
+  filter(auc_inhib > -100) %>% 
+ # filter(Tox == 0) %>% 
+  ggplot(aes(x = Conc, y = auc_inhib, colour = DIV))+
+  geom_point(shape = 21, alpha = 0.8)+
+  geom_line(aes(x = Conc, y = .fitted, group = BOT)) +
+  geom_hline(aes(yintercept = 0), size = 0.5, linetype = "dashed")+
+  facet_grid(Tox~Substance, scales = "free")+
+  #facet_grid(BOT~Substance, scales = "free")+
+  scale_x_log10()+
+  theme_bw()+
+  #labs(title = "AUC values for MT2 plates - end-time sampling")+
+  scale_color_manual(values = c("darkgreen", "darkblue"))
+  
+  
+ 
+```
+
+## Ciprofloxacin 100
+
+We analyse the data collected at the "end" sampling (after the long-term exposure (1 week) to ciprofloxacin)
+
+in this assay we tested the full diveristy gradient (Div1 - Div5) on a plate containing a constant concentration of 100 nM Ciprofloxacin. 
+
+In that way we can test weather the percent inhibition at that concentrtion changed with diveristy level. 
+
+![set2](MT2/MT2_cipro100.jpeg)
+![set2](MT2/MT2_control.jpeg)
+
+
+###AUC
+
+Area-under-the-curve values for control and five challange substance along the challange substance concentration gradient
+**End-time-sampling**. Five challange substances, 2 diveristy levels 6 Toxicity levels. 
+
+The control has a concentration of 0 but is shown at 0.001 to fit on log scale.
+
+```{r}
+  
+MT2_Cipro <- 
+  MT2 %>% 
+  filter(grepl("Kontroll", Sample) |
+         Sample == "Cipro100") %>% 
+  filter(Sample != "cipro100") %>% 
+  filter(Tox != "Blank") %>%
+  mutate(DIV = substr(Treatment, 4, 4)) %>%
+  select(Sample, DIV,Tox, Conc, auc) %>% 
+  distinct() %>% 
+  rename(Substance = Tox) 
+
+
+MT2_Cipro %>% 
+  mutate(Conc = ifelse(is.na(Conc), 0, Conc)) %>% 
+  ggplot(aes(x = as.factor(Conc), y = auc, colour = as.factor(Conc)))+
+  geom_point(shape = 21, alpha = 0.8, position = position_jitter(width = 0.2))+
+  geom_boxplot(fill = NA)+
+  facet_wrap(~DIV, nrow = 1)+
+  theme_bw()+
+  labs(title = "AUC values for Cipro_100 plates - end-time sampling")+
+  scale_color_manual(values = c("darkblue", "darkred"))+
+  theme(legend.position = "bottom")
+```
+
