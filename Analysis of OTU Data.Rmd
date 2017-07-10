@@ -1,0 +1,675 @@
+---
+title: "Analysis of SEQ Data"
+author: "Fabian Roger"
+date: "27 Nov 2015"
+output:
+  html_document:
+    fig_caption: yes
+    toc: yes
+  pdf_document:
+    latex_engine: lualatex
+    toc: yes
+---
+
+__this script imports:__ 
+
++ Sequence_Analyis/Seq_table.txt          *cleaned SEQ table (only Bacteria)*
++ Sequence_Analyis/Tax_table.txt          *cleaned Taxonomic table*
++ Sequence_Analyis/FastTree_um_oT.tre     *ultrametric tree*
++ BOT_ID.txt                              *sample meta-data*
+   
+__this script does:__
+
+  + some summary statistics 
+  + sensitivity analysis of diversity metrics to rarefaction
+  + calculates effective number of species
+  + calculates phylogenetic diversity
+  + plots heatmaps of dominant SEQs
+  
+__this script exports:__
+  
+  data frames:
+  
+  + SEQ_docs/DIV.txt      *effective number of species and phylogenetic diversity based on hill numbers*
+  
+  figures:
+  
+  + figures/Figure_2.pdf  *heatmap of average abundance of most common SEQs*
+  + figures/Figure_S_3.pdf *diveristy estimation at different rarefaction*
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message=FALSE)
+```
+
+
+```{r}
+library(entropart)
+library(phyloseq)
+library(picante)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(corrplot)
+library(GGally)
+library(readr)
+library(knitr)
+library(DESeq2)
+```
+
+
+TO DO:
+
+> check for trends in individual genrea
+> check for trends in individual Sequences (make sure to label it as Hyp. genrating though)
+
+
+Read in the relevant files:
+```{r import data}
+SEQ <- read_tsv("Sequence_Analyis/Seq_table.txt")
+TAX <- read_tsv("Sequence_Analyis/Tax_table.txt")
+TREE <- read.tree("Sequence_Analyis/FastTree_rooted")
+ID <- read.table("ID.txt", stringsAsFactors = F)
+
+ID <- mutate(ID, Sample = paste(tolower(Sampling), formatC(BOT, width = 2, flag = 0), sep = "-")) %>% 
+  left_join(data.frame(Sample = unique(SEQ$Sample)), .) %>% 
+  mutate(DIV = ifelse(grepl("Inokulum", Sample), "I", DIV)) %>% 
+  mutate(Tox = ifelse(grepl("Inokulum", Sample), 0, Tox)) %>% 
+  mutate(ToxC = ifelse(grepl("Inokulum", Sample), 0, ToxC)) %>% 
+  mutate(Tox_log = ifelse(grepl("Inokulum", Sample), 0, Tox_log)) %>% 
+  mutate(Sampling = ifelse(grepl("Inokulum", Sample), "Inokulum", Sampling))
+
+
+```
+
+### seqeuncing depth 
+
+Looking at the sequencing depth of the SEQ data:
+
+```{r sequencing depth, fig.width=5, echo=FALSE}
+DEPTH <- SEQ %>% 
+  mutate(Depth = rowSums(.[,-1])) %>% 
+  select(Sample, Depth) %>% 
+  arrange(desc(Depth)) %>% 
+  mutate(Rank = 1:nrow(.))
+  
+ggplot(DEPTH, aes(x = Rank, y = Depth)) + 
+  geom_point()+
+  geom_hline(yintercept = c(5e4,4e4,3e4,2e4),
+             linetype = "dashed")+
+  theme_bw()
+
+ggplot(DEPTH, aes(x = Depth))+
+  geom_histogram()+
+  theme_bw()
+```
+
+We can see that the sequencing depth is quite variable and some samples have low coverage. 
+
+```{r sequencing depth 2}
+DEPTH %>% 
+  filter(Depth < 2e4) %>% 
+  left_join(ID) %>% 
+  kable
+```
+
+There are 8 samples with less than 20,000 reads, 5 of which still have > 9000 reads. 4 samples have < 1300 reads, with three samples having virtually no reads. All but 2 samples with < 20,000 reads are sterile controls where no or only few reads are expected. The remaining two samples belong to bottle 8 and 45 respectively, both representing diversity level 4. 
+
++ `r ID %>% filter(Sample == "end-08")` should have had reads and the complete absence of reads points to an experimental error during sampling / DNA extraction / library preparation. However it is only 1 out of 8 replicates and it's loss is not tragic.
+
++ `r ID %>% filter(Sample == "mid-45")` is not replicated but has ~20,000 reads which should be plenty. 
+
+We keep all samples at this stage, also to check for possible contaminations in the sterile control. 
+
+### sensitivity of diveristy estimation to sequencing depth
+
+For the remaining data set, we want to test whether the diversity estimate is sensitive to the sampling depth to see whether we need to rarefy to equal depth. Below, we rarefy the data set to following depth `r seq(1e3,2.5e4,5e3)`, calculate the effective number of species and correlate the results.
+
+We calculate the effective number of species of order 1, corresponding to the exponential of the Shannon entropy. For this test we don't apply any bias correction.
+
+```{r sensitivity to rarefaction, include=FALSE, eval=TRUE}
+
+DIV.res <- vector("list")
+
+DivSeq <- seq(1e3,2.5e4,5e3)
+
+for (i in seq_along(DivSeq)) {
+  R <- DivSeq[i]
+    
+  which_Samples <- filter(DEPTH, Depth >= R) %>% select(Sample)
+  
+  SEQ_t <-  SEQ[match(which_Samples$Sample, SEQ$Sample),] %>% 
+    select(-Sample) %>%
+    as.matrix() %>% 
+    rrarefy(.,R) 
+    
+  rownames(SEQ_t) <- which_Samples$Sample
+  
+  MC <- MetaCommunity(t(SEQ_t))
+  DIV.res[[i]] <- AlphaDiversity(MC, Correction = "None")$Communities  %>% 
+    data.frame( DIV = .) %>% 
+    add_rownames( var = "Sample") %>% 
+    mutate( DF = paste("DIV", R, sep = "_"))
+  
+}
+
+
+MC <- MetaCommunity(t(SEQ[,-1]))
+
+DIV.res[[6]] <- AlphaDiversity(MC, Correction = "None")$Communities  %>% 
+    data.frame( DIV = .) %>% 
+    mutate( Sample = SEQ$Sample) %>% 
+    mutate( DF = "DIV_full")
+  
+  
+DIV.res[[7]] <- AlphaDiversity(MC, Correction = "Best")$Communities  %>% 
+     data.frame( DIV = .) %>% 
+    mutate( Sample = SEQ$Sample) %>% 
+    mutate( DF = "DIV_corr")
+
+DIV <- bind_rows(DIV.res) %>% 
+  spread(DF, DIV)
+
+
+```
+
+```{r plot Figure_S_3, echo=FALSE, eval=TRUE}
+DIV %>% 
+  select(-Sample) %>% 
+  cor(use = "pairwise.complete.obs") %>% 
+  corrplot(method = "ellipse")
+
+DIV %>% 
+  select(-Sample) %>% 
+  filter(!is.na(rowSums(.))) %>% 
+  ggpairs
+```
+
+We can see that the effective number of species is insensitive to sequencing depth and that the results are virtually identical irrespective of the rarefaction level or whether we use the full data set with or without correction
+
+In an attempt to reduce a possible sampling bias, but without unnecessarily discarding data, we choose the following approach:
+
++ all samples with more than 30000 reads (`r length(which(rowSums(SEQ[,-1]) >= 30000))` samples) are rarefied to 300000 reads.
+
++ all samples with below 10000 reads (`r length(which(rowSums(SEQ[,-1]) < 30000 & rowSums(SEQ[,-1]) >= 1000))` samples) are kept as is. 
+
++ all samples with below 10000 reads (`r length(which(rowSums(SEQ[,-1]) < 1000))` samples) are excluded for the estimation of diveristy
+
++ no correction is applied, because until now it is not clear if correction is accurate for sequencing data (that may contain biased estimates of singletons and doubletons as singletons have been excluded and doubletons may also represent spurious SEQs).
+
++ the above mentioned rules are applied to both estimates, with and without the incorporation of phylogenetic diversity.
+
+### effective number of species and richness
+
+```{r calculate effective number of species}
+#filter out samples with less than 1000 reads
+
+SEQ_r <- 
+  SEQ %>%
+  filter(rowSums(.[, 2:ncol(.)]) >= 1000)
+
+SEQ_r_t <- 
+SEQ_r %>% 
+  gather("Species", "reads", -Sample) %>% 
+  spread(Sample, reads) %>% 
+  as.data.frame()
+
+row.names(SEQ_r_t) <- SEQ_r_t$Species
+
+
+
+  
+MC <-   MetaCommunity(SEQ_r_t[,-1])
+
+DIV <- AlphaDiversity(MC, q = 1, Correction="None")$Communities %>%
+  data.frame( effN = .) %>% 
+  add_rownames( var = "Sample") %>% 
+  left_join(ID, .)
+
+DIV <- AlphaDiversity(MC, q = 0, Correction="None")$Communities %>% 
+  data.frame( Richness = .) %>% 
+  add_rownames( var = "Sample") %>% 
+  left_join(DIV, .)
+```
+
+Let's have a look at the calculated diversity levels:
+
+```{r plot effN of species, echo = FALSE}
+DIV$Sampling <- factor(DIV$Sampling, levels=c("Inokulum", "Mid", "End"))
+
+ggplot(DIV, aes(x = DIV, y = effN, colour = Tox_log, group = Sampling))+
+  geom_point()+
+  stat_smooth(method = "lm", se = F)+
+  facet_wrap(~Sampling, labeller = label_wrap_gen(multi_line = FALSE))+
+  scale_y_log10(breaks = c(2,4,8,16,32))+
+  #scale_colour_manual(values = c("orange", "darkred", "darkgreen", "darkblue"  ))+
+  theme_bw()+
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5))+
+  labs( x = "Dillution factor", y= "alpha diversity (q = 1)", title = "effective number of species")
+
+DIV %>%
+  filter(!grepl("S", DIV)) %>% 
+  filter(!grepl("I", DIV)) %>% 
+  filter(Sampling != "Mid") %>% 
+ggplot(aes(x = Tox_log, y = effN, colour = Tox_log, group = Sampling))+
+  geom_point()+
+  stat_smooth(method = "lm", se = F)+
+  facet_grid(~DIV, labeller = label_wrap_gen(multi_line = FALSE))+
+  scale_y_log10(breaks = c(2,4,8,16,32,64,128,256))+
+  #scale_colour_manual(values = c("orange", "darkred", "darkgreen", "darkblue"  ))+
+  theme_bw()+
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5))+
+  labs( x = "Dillution factor", y= "alpha diversity (q = 1)", title = "effective number of species")
+  
+
+
+# Richness
+DIV %>%
+  filter(!grepl("S", DIV)) %>% 
+  filter(!grepl("I", DIV)) %>% 
+ggplot( aes(x = DIV, y = Richness, colour = Tox_log, group = Sampling))+
+  geom_point()+
+  stat_smooth(method = "lm", se = F)+
+  facet_wrap(~Sampling, labeller = label_wrap_gen(multi_line = FALSE))+
+  scale_y_log10(breaks = c(2,4,8,16,32))+
+  #scale_colour_manual(values = c("orange", "darkred", "darkgreen", "darkblue"  ))+
+  theme_bw()+
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5))+
+labs( x = "Dillution factor", y= "S", title = "Richness")
+
+
+
+
+DIV %>% 
+  mutate(DIV = ifelse(grepl("S", DIV), "S", DIV)) %>% 
+  filter(!grepl("I", DIV)) %>%
+  ggplot(., aes(x = Sampling, y = effN, colour = Tox_log, group = BOT))+
+  geom_point(position = position_dodge(width = 0.1))+
+  geom_line(position = position_dodge(width = 0.1))+
+  facet_wrap(~DIV, labeller = label_wrap_gen(multi_line = FALSE))+
+  scale_y_log10(breaks = c(2,4,8,16,32))+
+  #scale_colour_manual(values = c("orange", "darkred", "darkgreen", "darkblue"  ))+
+  theme_bw()+
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5))+
+  labs( x = "Dillution factor", y= "alpha diversity (q = 1)", title = "effective number of species")
+```
+
+### phylogenetic diveristy
+
+```{r calculate phlo diversity, eval=TRUE}
+
+library(phangorn)
+TREE <- nnls.tree(cophenetic(TREE),TREE,
+        rooted=TRUE,trace=0)
+
+TREE <- midpoint(TREE)
+
+DIV <- AlphaDiversity(MC, q = 1, Tree = TREE, Correction="None")$Communities %>%
+  data.frame( PD = .) %>% 
+  add_rownames( var = "Sample") %>% 
+  left_join(DIV, .)
+
+```
+
+```{r plot phylo diversity, echo = FALSE, eval=TRUE}
+
+ggplot(DIV, aes(x = DIV, y = PD, colour = Tox_log, group = Sampling))+
+  geom_point()+
+  stat_smooth(method = "lm", se = F)+
+  facet_wrap(~Sampling, labeller = label_wrap_gen(multi_line = FALSE))+
+  scale_y_log10(breaks = c(2,4,8,16,32))+
+  theme_bw()+
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5))+
+  labs( x = "Dillution factor", y= "phylogenetic diversity (q = 1)", title = "phylogenetic diversity") 
+
+ DIV %>%
+  filter(!grepl("S", DIV)) %>% 
+  filter(!grepl("I", DIV)) %>% 
+  ggplot(., aes(x = Tox_log, y = PD, colour = Tox_log, group = Sampling))+
+  geom_point()+
+  stat_smooth(method = "lm", se = F)+
+  facet_grid(Sampling~DIV, labeller = label_wrap_gen(multi_line = FALSE))+
+  scale_y_log10(breaks = c(2,4,8,16,32))+
+  theme_bw()+
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5))+
+  labs( x = "Dillution factor", y= "phylogenetic diversity (q = 1)", title = "phylogenetic diversity")
+
+
+DIV %>% 
+  mutate(DIV = ifelse(grepl("S", DIV), "S", DIV)) %>% 
+  filter(!grepl("I", DIV)) %>%
+ggplot(., aes(x = Sampling, y = PD, colour = Tox_log, group = BOT))+
+  geom_point(position = position_dodge(width = 0.1))+
+  geom_line(position = position_dodge(width = 0.1))+
+  facet_wrap(~DIV, labeller = label_wrap_gen(multi_line = FALSE))+
+  scale_y_log10(breaks = c(2,4,8,16,32))+
+  #scale_colour_manual(values = c("orange", "darkred", "darkgreen", "darkblue"  ))+
+  theme_bw()+
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5))+
+  labs( x = "Dillution factor", y= "phylogenetic diversity (q = 1)", title = "phylogenetic diversity")
+```
+ 
+```{r correlation of div metrics, echo = FALSE, eval=TRUE}
+  DIV %>%
+  filter(!grepl("S", DIV)) %>% 
+  filter(!grepl("I", DIV)) %>% 
+  ggplot(., aes(x = effN, y = PD, colour = Tox_log))+
+  geom_point()+
+  #stat_smooth(method = "lm", se = F, aes(group = Sampling), 
+  #            linetype = "dashed", colour = "grey")+
+  #stat_smooth(method = "lm", se = F, colour = "black")+
+  scale_y_log10(breaks = c(2,4,8,16,32))+
+  theme_bw()+
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5))+
+  labs( x = "effective number of species (q = 1)", y= "phylogenetic diversity (q = 1)", title = "correlation of diversty metrics")
+```
+ 
+ 
+Export table with diversity metrics:
+
+```{r write diveristy data, eval=TRUE}
+
+write.table(DIV, "Sequence_Analyis/DIV.txt", sep="\t")
+
+```
+
+### heatmap of SEQ composition
+
+To visualize the distribution of SEQs in the different dilutions/lakes, we produce a heatmap. Since we cannot possibly represent all SEQs, we only look at the SEQs that make up **at least 1 % of the total reads** in **at least 1 sample**
+
+As we work with proportions, we take the unrarefied SEQ table.
+
+However we exclude the following samples as they have too few reads
+
+```{r}
+DEPTH %>% filter(Depth < 1000) %>% left_join(ID)
+```
+
+
+```{r make heatmap, echo = F, fig.height=24, fig.width=12}
+# to keep as much taxonomic information as possible we carry over the TAX ID's to lower levels for those SEQ'S where a lower-level
+# assignemnt isn't possible
+
+TAX <- TAX %>% as.matrix
+
+for (i in 2:ncol(TAX)){
+  WT <- which( is.na( TAX[ ,i]))
+  TAX[WT, i] <- paste(substr(colnames(TAX), 1,1)[i-1], TAX[WT, i-1], sep = ":")
+}
+
+rownames(TAX) <- TAX[,1]
+TAX <- TAX[,2:ncol(TAX)]
+
+rownames(ID) <- ID$Sample
+ID$Sampling <- factor(ID$Sampling, levels = c("Inokulum", "Mid", "End"))
+ID_noS <- ID[!grepl("S", ID$DIV), ]
+
+ID_noS$label <- paste(ID_noS$Sampling, ID_noS$DIV, ID_noS$ToxC, sep = "_")
+
+SEQ.m <- as.matrix(SEQ[,-1])
+
+rownames(SEQ.m) <- SEQ$Sample
+
+# subset and transform SEQ table
+SEQp <- SEQ.m[which(rowSums(SEQ.m) >= 1000),] # exclude sample with too few reads
+
+SEQp <- t(apply(SEQp, 1, function(x) {(x / sum(x)) * 100})) #transform reads into percentages
+
+# subset to SEQs that have min 2% of abundance in at least 1 sample
+SEQ_2p <- which( apply(SEQp, 2, function(x) max(x) >= 2) == TRUE) # list of SEQs
+
+
+ID_noS <- ID_noS %>% rename(Sample = "ID")
+
+Phy_obj <- phyloseq(otu_table(SEQp[ ,SEQ_2p ], taxa_are_rows = FALSE),
+                    tax_table(TAX),
+                    phy_tree(TREE),
+                    sample_data(ID_noS))
+
+
+
+Phy_obj@sam_data$Sampling  <- factor(Phy_obj@sam_data$Sampling, levels = c("Inokulum", "Mid", "End"))
+
+HeatMap_1p <- plot_heatmap(Phy_obj,
+                           distance = "bray",
+                           sample.label = "label", 
+                           taxa.label = "Order",
+                           sample.order = ID_noS[with(ID_noS, 
+                                                      order(DIV, ToxC,                                                              Sampling)),]$ID)
+
+HeatMap_1p + 
+  facet_grid(~Sampling, scales = "free_x",  space = "free_x", labeller = label_wrap_gen(multi_line = FALSE)) +
+  labs(x = "Dilution factor", y = "order of SEQ",
+       title = "heatmap of SEQs (> 2% reads in ≥ 1 sample)")+
+  theme_bw(base_size = 8)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  geom_vline(aes(xintercept = 3.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 9.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 12.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 18.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 21.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 27.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 30.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 36.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 39.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 45.5), colour = "darkgrey", linetype = "dashed")
+  
+
+
+```
+
+
+plot the difference
+
+```{r plot heatmap of ecolog plates diff, echo = FALSE, fig.width = 14, fig.height = 8}
+
+
+MidSeq <-  SEQp[ ,SEQ_1p ][grepl("mid", rownames(SEQp)),]
+EndSeq <-  SEQp[ ,SEQ_1p ][grepl("end", rownames(SEQp)),]
+
+MidEndSamples <- intersect(
+substr(rownames(MidSeq), 5,6),
+substr(rownames(EndSeq), 5,6))
+
+EndSeq <- EndSeq[paste("end", MidEndSamples, sep = "-"), ] %>% 
+  decostand("normalize", 1)
+MidSeq <- MidSeq[paste("mid", MidEndSamples, sep = "-"), ] %>% 
+  decostand("normalize", 1)
+
+diffSeq <- ((MidSeq-EndSeq)/MidSeq)*100
+
+
+  
+
+Phy_obj_diff <- phyloseq(otu_table(diffSeq, taxa_are_rows = FALSE),
+                    tax_table(TAX),
+                    phy_tree(TREE),
+                    sample_data(ID_noS))
+
+Phy_obj_diff@sam_data$Sampling <- factor(Phy_obj_diff@sam_data$Sampling, levels = c("Mid", "End"))
+
+HeatMap_diff <- plot_heatmap(Phy_obj_diff,
+                           sample.label = "label", 
+                           taxa.label = "Order",
+                           taxa.order = levels(HeatMap_1p$data$OTU),
+                           sample.order = ID_noS[with(ID_noS, 
+                                                      order(DIV, ToxC,                                                              Sampling)),]$bot_label,
+                           trans = "identity")
+
+HeatMap_diff + 
+  labs(x = "Dilution factor", y = "order of SEQ",
+       title = "heatmap of SEQs (> 2% reads in ≥ 1 sample)")+
+  theme_bw(base_size = 8)+
+   scale_fill_gradientn(colours=c("darkred","white","darkblue"), limits = c(-100,100), na.value ="white"  )+
+   theme_bw(base_size = 8)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  geom_vline(aes(xintercept = 3.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 9.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 12.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 18.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 21.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 27.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 30.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 35.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 38.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 45.5), colour = "darkgrey", linetype = "dashed")
+  
+
+```
+
+
+
+
+
+```{r}
+
+Phy_all <- phyloseq(otu_table(SEQp, taxa_are_rows = FALSE),
+                    tax_table(TAX),
+                    phy_tree(TREE),
+                    sample_data(ID_noS))
+
+ORD <- ordinate(Phy_all, "NMDS", distance = "wunifrac")
+
+plot_ordination(Phy_all, ORD, color = "DIV", shape = "Sampling") +
+  facet_wrap(~DIV)
+
+ORD_end <- subset_samples(Phy_all, Sampling == "End") %>% 
+  ordinate(., "NMDS", distance = "wunifrac") 
+
+subset_samples(Phy_all, Sampling == "End") %>%   
+plot_ordination(., ORD_end, color = "Tox_log")+
+  facet_wrap(~DIV)
+```
+
+### Deseq2 analysis 
+
+
+```{r}
+
+SEQ.m_nI <- SEQ.m[!grepl("Inokulum", row.names(SEQ.m)), ]
+SEQ.m_nI <- SEQ.m_nI[, colSums(SEQ.m_nI) > 0]
+
+Phy_counts <- phyloseq(otu_table(SEQ.m, taxa_are_rows = FALSE),
+                    tax_table(TAX),
+                    phy_tree(TREE),
+                    sample_data(ID))
+#
+Phy_counts_end <- subset_samples(Phy_counts, Sampling == "End" & DIV %in% c("1", "2", "3", "4", "5"))
+#Phy_counts_end@sam_data$DIV <- as.numeric(Phy_counts_end@sam_data$DIV)
+
+sample_data(Phy_counts_end)
+Seq_d2_end <- phyloseq_to_deseq2(Phy_counts_end, ~DIV * Tox_log)
+
+cts <- counts(Seq_d2_end)
+
+#
+Seq_d2 <- phyloseq_to_deseq2(Phy_counts, ~Sampling * ToxC)
+
+cts <- counts(Seq_d2)
+
+geoMeans <- apply(cts, 1, function(row) if (all(row == 0)) 0 else exp(mean(log(row[row != 0]))))
+
+Seq_d2 <- estimateSizeFactors(Seq_d2, geoMeans=geoMeans)
+
+Seq_d2_end <- estimateSizeFactors(Seq_d2_end, geoMeans=geoMeans)
+
+Sigdiff_end <- DESeq(Seq_d2_end, fitType = "parametric", test = "Wald", minReplicatesForReplace = Inf)
+
+re_end = results(Sigdiff_end, name = "Tox_log", cooksCutoff = FALSE)
+sigtab_end <- re_end[re_end$padj < 0.05 & ! is.na(re_end$padj),]
+
+Sigdiff <- DESeq(Seq_d2, fitType = "parametric", test = "Wald", minReplicatesForReplace = Inf)
+
+
+res = results(Sigdiff, name = "ToxC", cooksCutoff = FALSE)
+
+sigtab <- res[res$padj < 0.05 & ! is.na(res$padj),]
+sigtab
+
+plotDispEsts(Sigdiff, main = "dispersion estimations")
+plotMA(res, alpha = 0.05,
+       main = "shrunken log2fold changes with unit process rate change")
+
+```
+```{r}
+VST <- assay(varianceStabilizingTransformation(Sigdiff, blind = T))
+
+VST[VST < 0 ]  <- 0
+
+VST <- VST[ - c(which(rowSums(VST) == 0)), ]
+
+NMDS_plot <- metaMDS(t(VST), autotransform = FALSE, trace = 0, distance = "bray")
+
+
+stressplot(NMDS_plot)
+
+#Stress_nif <- NMDS_nif$stress
+
+NMDS_plot <- NMDS_plot$points %>% 
+  data.frame() %>% 
+  rownames_to_column(var = "Sample") %>% 
+  left_join(.,ID) %>% 
+  mutate(DIV = ifelse(grepl("S", DIV), "S", DIV)) 
+
+ggplot(NMDS_plot, aes(x = MDS1, y =MDS2, colour = DIV))+
+  #facet_wrap(~DIV)+
+  geom_point(size = 3, alpha = 0.6)+
+  theme_bw()
+
+NMDS_plot %>% 
+  filter(Sampling != "Inokulum") %>% 
+  #filter(DIV == 2) %>% 
+  filter(Sampling == "End") %>% 
+  ggplot(aes(x = MDS1, y =MDS2, colour = Tox_log))+
+ # facet_grid(Sampling~DIV) +
+  geom_point(size = 3, alpha = 0.6)+
+  theme_bw()
+  
+```
+
+
+```{r}
+PS_tax <- phyloseq(otu_table(VST, taxa_are_rows = T),
+                    phy_tree(TREE))
+
+Dist <- UniFrac(PS_tax, weighted = T)
+
+NMDS_tax <- metaMDS(Dist, autotransform = FALSE, trace = 0)
+
+stressplot(NMDS_tax)
+
+#Stress_nif <- NMDS_nif$stress
+
+NMDS_tax <- NMDS_tax$points %>% 
+  data.frame() %>% 
+  rownames_to_column(var = "Sample") %>% 
+  left_join(.,ID) %>% 
+  mutate(DIV = ifelse(grepl("S", DIV), "S", DIV))
+
+
+ggplot(NMDS_tax, aes(x = MDS1, y =MDS2, fill = DIV))+
+  geom_point(size = 3, alpha = 0.6, shape = 21)+
+  #facet_grid(Sampling~DIV)+
+ # geom_label(data = filter(NMDS_nifh, sample %in% c(32:36, 42)), aes(label = sample), 
+  #          nudge_x= 0.05, size = 6, alpha = 0.4)+
+  theme_bw()
+
+NMDS_tax %>% 
+  filter(Sampling != "Inokulum") %>% 
+  filter(DIV != "S") %>% 
+  ggplot(aes(x = MDS1, y =MDS2, colour = as.factor(ToxC)))+
+  facet_grid(Sampling~DIV) +
+  geom_point(size = 3, alpha = 0.6)+
+  theme_bw()
+  
+
+
+```
+
