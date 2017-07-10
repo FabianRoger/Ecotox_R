@@ -1,0 +1,405 @@
+---
+title: "Analysis of Ecolog plates"
+author: "Fabian Roger"
+date: "21 Jun 2016"
+output:
+  html_document:
+    fig_caption: yes
+    toc: yes
+  pdf_document:
+    latex_engine: lualatex
+    toc: yes
+---
+
+I analyse the data from the Carbon Source Utilization Profiling using the BIOLOG™ Ecoplates
+
+__this script imports:__ 
+
++ Ecolog/EcoLog.txt       # corrected OD readings and model paramater estimates and area under the curve estimates from teh Biolog data
++ BOT_ID.txt              # sample metadata
+   
+__this script does:__
+
+  
+  
+  
+__this script exports:__
+
++ Ecolog/FunDiv.txt
+  
+  
+  
+```{r, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message=FALSE)
+```
+
+```{r load packages, echo = FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(broom)
+library(magrittr)
+library(tidyr)
+library(phyloseq)
+library(vegan)
+```
+
+### analysis to do:
+
+> Significances between control and treatment in order to
+determine No Observed Effect Concentrations (NOECs) were calculated using Dunnett’s test or the Anosim method as suggested by Clarke and Green (1988). Minimum significant differences were calculated following the approach of the US EPA (2010).
+
+> Effects on pigment composition were calculated as percent inhibition in relation to the average control for total pigments and for each individual pigment.
+
+> The effect of ciprofloxacin on the average well color (AWC), [...] EC10, EC50 and EC90 values after a fit of the Weibull model are given for an incubation time of 42–96 h in the Ecolog plates, together with the corresponding No Observed Effect Concentrations (NOECs) and Minimum Significant Differences (MSDs).
+
+( for different time points)
+
+> At the same time the data become more robust as the measured raw colour values increase and become less impacted by experimental (technical) noise. This is clearly visible in the decrease of the minimum significant difference (MSD) over time.
+
+> The NOEC for ciprofloxacin (Dunnett’s test,  ̨ = 0.05) after this incubation time is 26 nmol/L, with a MSD of 19.24%. The corresponding regression-based EC10 is 46.1nmol/L with an approximate 95% confidence interval of 20.2–102.2 nmol/L, the EC50 is 490.7 nmol/L (360–663 nmol/L).
+
+
+> The catabolic activity in this study was unevenly distributed between the 31 carbon sources present on the Ecolog plates, and not all carbon sources were utilized by the biofilm communities. Seven carbon sources never reached a corrected absorbance (CorrAbs) of 0.05 or higher (C9, C11, C17, C19, C22, C24 and C31, for the chemical identification of the carbon sources see Appendix 2 in the supporting information) and were classified as inactive.
+
+> Time-integrated carbon source utilization was calculated using the area under the curve (AUC), which provides an overall measure of the carbon source utilization during the incubation time of 96 h. Calculating the inhibition of the AUC in relation to ciprofloxacin exposure depends on a reliable Weibull fit (time vs. CorrAbs) for the untreated control communities, which was possible for 21 of the 31 carbon sources (Appendix 3, supporting information).
+
+> Plotting the average inhibition of the AUC then yields a concentration–response curve that is virtually identical to the AWC inhibition curve 
+
+> plotting the relative AUC values for the various concentrations
+
+
+
+
+
+### calculate functional diversity based on auc
+
+
+Import data
+```{r}
+EcoL <- read.table("Ecolog/EcoLog.txt")
+ID <- read.table("ID.txt")
+DIV <- read.table("Sequence_Analyis/DIV.txt")
+```
+
+
+Now we need to put the data in the form of a matrix where each row is a plate and each column is a carbon source. We will take each carbon source as different *trait* with the area under the curve `auc` as *trait value*. 
+
+For that we first create a data frame with `Sample` and `Bot` and a unique `Sample_BOT` identifier, and the median estimated auc's
+
+```{r prepare calculation of functional diversity}
+EcoL_Func <- EcoL %>% 
+  select(Sampling, BOT, Wells, rep, auc) %>%
+  distinct() %>% 
+  mutate(ID = paste(Sampling, BOT, sep = "_")) %>% 
+  filter(!is.na(auc)) %>% #filter out wells that couldn't be modelled
+  group_by(Sampling, BOT, Wells,ID) %>% 
+  summarise(auc = median(auc)) %>% ungroup
+  
+EcoL_Func_M <- 
+  spread(EcoL_Func, Wells, auc) %T>%
+  {assign("RowNames", .$ID, pos = ".GlobalEnv" )} %>%  # we store the rownames seperately to be sure to not mix up our sample names
+  select( -ID, -Sampling, -BOT) %>% 
+  as.matrix()
+
+EcoL_Func_M[is.na(EcoL_Func_M)] <- 0 # three NA's arise when spreading the dataframe to wide format. These arise becasue all replicates of these wells (on the respective plates) have been qualified as positive but where subsequently all excluded because of bad fit. This happened becasue they passed the lax criterion for "positive growth" but could't be modelled well as no real growth occured. I checked and none of the replicates of either of the wells shows any growth. I set them to 0
+
+rownames(EcoL_Func_M) <- RowNames
+```
+
+Let's take the chance to look at the utilization pattern on the EcoLog plates. 
+
+```{r plot heatmap of ecolog plates, echo = FALSE, fig.width = 14, fig.height = 8}
+rownames(ID) <- paste(ID$Sampling, ID$BOT, sep="_")
+ID$label <- paste(ID$Sampling, ID$DIV, ID$ToxC, sep = "_")
+
+WellID <- read.table("EcoLog/Compounds.txt", header=T, stringsAsFactors = FALSE) %>% 
+  arrange( Group) %>% 
+  mutate(Well_label = paste(Compound, Group, sep = " | "))
+
+rownames(WellID) <- WellID$Wells
+
+Ecolog_phylo <- phyloseq(otu_table(EcoL_Func_M, taxa_are_rows = FALSE),
+                         sample_data(ID),
+                         tax_table(as.matrix(WellID)))
+
+sample_data(Ecolog_phylo)$Sampling <- factor(sample_data(Ecolog_phylo)$Sampling, levels = c("Mid", "End"))
+
+C_heat <- plot_heatmap(Ecolog_phylo,
+             sample.label = "label",
+             sample.order = rownames(ID),
+             taxa.label = "Well_label",
+             taxa.order = rownames(WellID))+
+  theme_bw(base_size = 11)+
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5, size = 6),
+        legend.position = "bottom")+
+    facet_wrap( ~ Sampling, scales = "free_x", ncol = 3)+
+  ggtitle("carbon source utilization pattern")+
+  geom_vline(aes(xintercept = 3.5), colour = "darkred", size = 0.2)+
+  geom_vline(aes(xintercept = 9.5), colour = "white", linetype = "dashed")+
+  geom_vline(aes(xintercept = 12.5), colour = "darkred", size = 0.2)+
+  geom_vline(aes(xintercept = 18.5), colour = "white", linetype = "dashed")+
+  geom_vline(aes(xintercept = 21.5), colour = "darkred", size = 0.2)+
+  geom_vline(aes(xintercept = 27.5), colour = "white", linetype = "dashed")+
+  geom_vline(aes(xintercept = 30.5), colour = "darkred", size = 0.2)+
+  geom_vline(aes(xintercept = 36.5), colour = "white", linetype = "dashed")+
+  geom_vline(aes(xintercept = 39.5), colour = "darkred", size = 0.2)+
+  geom_vline(aes(xintercept = 45.5), colour = "white", linetype = "dashed")
+
+C_heat
+  
+```
+
+plot the difference
+
+```{r plot heatmap of ecolog plates diff, echo = FALSE, fig.width = 14, fig.height = 8}
+
+EcoL_Func_M_Mid <- scale(EcoL_Func_M[ grep("Mid", rownames(EcoL_Func_M)), ], 
+                         scale = F)
+EcoL_Func_M_End <- scale(EcoL_Func_M[ grep("End", rownames(EcoL_Func_M)), ],
+                         scale = F)
+
+EcoL_Func_M_Diff <- EcoL_Func_M_End - EcoL_Func_M_Mid
+
+Ecolog_phylo_diff <- phyloseq(otu_table(EcoL_Func_M_Diff, 
+                                        taxa_are_rows = FALSE),
+                         sample_data(ID),
+                         tax_table(as.matrix(WellID)))
+
+C_heat <- plot_heatmap(Ecolog_phylo_diff,
+                       trans = NULL,
+             sample.label = "label",
+             sample.order = rownames(ID),
+             taxa.label = "Well_label",
+             taxa.order = rownames(WellID))+
+  theme_bw(base_size = 11)+
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5, size = 6),
+        legend.position = "bottom")+
+   # facet_wrap( ~ Sampling, scales = "free_x", ncol = 3)+
+  ggtitle("carbon source utilization pattern")+
+  geom_vline(aes(xintercept = 3.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 9.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 12.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 18.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 21.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 27.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 30.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 36.5), colour = "darkgrey", linetype = "dashed")+
+  geom_vline(aes(xintercept = 39.5), colour = "grey", size = 0.2)+
+  geom_vline(aes(xintercept = 45.5), colour = "darkgrey", linetype = "dashed")+
+  scale_fill_gradientn(colours=c("darkred","white","darkblue"))
+
+C_heat
+  
+```
+
+
+Now we calculate functional diversity of the samples. For that we will consider each carbon source as trait and the uptake rate as trait value. However, as we don't have information about which species have which traits we cannot compute trait diversity as it is usually done. 
+
+We choose another approach which is equivalent to the way we calculate species diversity, i.e. the effective number of traits in the community. For that we will calculate the Shannon entropy of traits in each sample, taking the AUC as "relative abundance". We will then convert the entropy to an effective number. 
+
+In our case the minimum value is 0 (no carbon source is metabolized) and the maximum value is 31 (all carbon sources are metabolized evenly).
+
+```{r calculate functional diveristy}
+FunDiv <- diversity(EcoL_Func_M) %>% 
+  exp() %>%
+  data.frame(FuncDiv = .) %>% 
+  add_rownames(var = "ID") %>% 
+  mutate(Sampling = substr(ID, 1,3)) %>% 
+  mutate(BOT = as.integer(sub(".+_(\\d+)", "\\1", ID))) %>%
+  left_join(., ID) %>% 
+  mutate(Sampling = factor(Sampling, levels = c("Mid", "End")))
+``` 
+
+We clean the data frame and export the Functional diversity data.
+
+```{r write data}
+
+write.table(FunDiv, "Ecolog/FunDiv.txt", sep = "\t")
+
+```
+
+Let's also have a quick look at the Functional diversity values that we calculated, by Lake and Sampling. 
+
+```{r plot functional diversity, echo = FALSE}
+   ggplot(FunDiv, aes(x = Sampling, y = FuncDiv, shape = Sampling))+
+  geom_point()+  
+  geom_line(aes(group = BOT), colour = "grey", size = 0.3) +
+    facet_wrap(~DIV,  labeller = label_wrap_gen(multi_line = FALSE), nrow = 1)+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5),
+        legend.position = "none")+
+    #scale_colour_manual(values = c("orange", "darkred", "darkgreen", "darkblue"  ))+
+    labs( y = "effective number of traits", x = "dilution factor", title = "functional diversity")
+
+FunDiv %>% filter(!DIV %in% c("S1", "S2", "S3", "S4") ) %>% 
+ ggplot(aes(x = Sampling, y = FuncDiv))+
+    geom_point(shape = 21, size = 3)+
+    geom_line(aes(group = BOT), colour = "darkblue", size = 0.3) +
+    facet_grid(ToxC~DIV)+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.5),
+        legend.position = "right")+
+    #scale_colour_manual(values = c("orange", "darkred", "darkgreen", "darkblue"  ))+
+    labs( y = "effective number of traits", x = "dilution factor", title = "functional diversity")
+  
+```
+
+
+
+### calculation of toxiciological effects on Carbon source utilization
+
+dose response curve based on functional diveristy:
+
+ + effect is calculated as percentage change from median control
+
+  
+```{r, calculate percenatge change in functional diversity}
+
+Control_median_FD <- FunDiv %>% 
+  filter(Tox == 0, ! DIV %in%  c("S1", "S2", "S3", "S4")) %>%
+  group_by(DIV, Sampling) %>% 
+  summarize(median_FD = median(FuncDiv)) %>% 
+  spread(Sampling, median_FD) %>% 
+  rename(FD_cont_mid = Mid) %>% 
+  rename(FD_cont_end = End)
+
+FunDiv %>% 
+  select(Sampling, DIV, Tox, ToxC, FuncDiv) %>% 
+  filter(Tox != 0,
+         ! DIV %in%  c("S1", "S2", "S3", "S4")) %>%
+  spread(Sampling, FuncDiv) %>% 
+  arrange(DIV, desc(Tox)) %>% 
+  left_join(Control_median_FD) %>% 
+  mutate(FD_inhib = 100 - (End / FD_cont_end) * (FD_cont_mid / Mid) * 100) %>% 
+  ggplot(., aes(x = ToxC, y = FD_inhib))+
+  geom_point(shape = 21, size = 3)+
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey")+
+  #stat_smooth(se = F, aes(group = DIV), size = 0.4, linetype = "dashed")+
+  scale_x_log10(breaks = signif(unique(FunDiv$ToxC), 2))+
+  theme_bw()+
+  facet_wrap(~DIV)+
+  labs(y = "percent inhbition of functional diversity",
+       x = "concentration of Ciprofloxacin in nM",
+       title = " dose - response curve for functional diversity")
+```
+
+
+NMDS plot based on AUC data 
+```{r}
+Eco_no_S <- prune_samples(sample_names(Ecolog_phylo)[-grep("S", sample_data(Ecolog_phylo)$DIV)], Ecolog_phylo)
+
+Ord <- ordinate(Eco_no_S, "NMDS", distance = "manhattan")
+
+plot_ordination(Eco_no_S, Ord, color = "Tox_log", shape ="Sampling")+
+  facet_wrap(~DIV)
+```
+
+
+
+dose response curve based on AWCD:
+
++ effect is calculated as percentage change from mean control
+
++ we calculate AWCD for those reading times that correspond between the mid and the end reading
+
+
+
+```{r, AWCD}
+
+EcoL %>% select(Sampling, dhour) %>% 
+  distinct %>% 
+  ggplot()+
+  geom_vline( aes(xintercept = dhour, colour = Sampling))+
+  facet_wrap(~Sampling, nrow = 2)+
+  theme_bw()+
+  scale_x_continuous(breaks = unique(floor(EcoL$dhour)))+
+  theme(axis.text.x = element_text(angle = -90))
+```
+
+The corresponding readings are at ~48h, 72h and 96h
+
++ we filter for the readings at these timepoints and group the readings to these three timepoints
++ we calculate the average well colour devellopment for each plate at these three timepoints
+
+```{r}
+
+AWCD <- 
+EcoL %>% 
+  filter(dhour > 45 & dhour < 52 | 
+         dhour > 70 & dhour < 75 |
+         dhour > 90 & dhour < 100) %>% 
+  mutate(dhour = ifelse(dhour > 45 & dhour < 52, 48,
+                ifelse(dhour > 70 & dhour < 75, 72,
+                       96))) %>% 
+  left_join(., ID) %>% 
+  filter( ! DIV %in%  c("S1", "S2", "S3", "S4")) %>% 
+  group_by(Sampling, BOT, dhour) %>%
+  summarize(AWCD = mean(CorrOD)) %>% 
+  left_join(., ID) %>% 
+  select(BOT, Sampling, DIV, Tox, ToxC, dhour, AWCD) %>% 
+  arrange(DIV, ToxC, dhour)
+  
+
+AWCD %>% 
+  mutate(ToxC = ifelse(ToxC == 0, 0.001, ToxC)) %>% 
+  ggplot(., aes(x = ToxC, y = AWCD, colour = Sampling))+
+  geom_point(shape = 21)+
+  geom_smooth(se = F, size = .5) +
+  facet_grid(dhour ~ DIV)+
+  scale_x_log10()+
+  theme_bw()
+
+```
+
+
+```{r, AWCD}
+  
+AWCD_cont <- 
+  AWCD %>% 
+  filter(Tox == 0) %>% 
+  ungroup() %>% 
+  group_by(Sampling, DIV, dhour) %>% 
+  summarise( AWCD = median(AWCD)) %>% 
+  spread(Sampling, AWCD) %>% 
+  rename(Cont_Mid = Mid,
+         Cont_End = End)
+    
+
+
+AWCD %>% 
+  filter(Tox != 0) %>% 
+  ungroup() %>% 
+  spread(Sampling, AWCD) %>% 
+  left_join(AWCD_cont) %>% 
+  mutate(AWCD_inhib = 100 - 100 * (End / Cont_End) * (Cont_Mid / Mid)) %>% 
+  filter(DIV != 1) %>% 
+  ggplot(., aes(x = ToxC, y = AWCD_inhib))+
+  geom_point(shape = 21, colour = "darkblue")+
+  geom_hline(aes(yintercept = 0), linetype = "dashed")+
+  facet_grid(dhour ~ DIV, scales = "free")+
+  scale_x_log10(breaks = signif(unique(ID$ToxC), 2))+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = -45, hjust = 0))
+    
+  
+```
+
+
+
+
+
+dose response curve based on AUC and betadist:
+
++ effect is calculated as percentage change from mean control
+ + I calculate it twice:
+    + all diveristy levels pooled
+    + per diveristy level
+    
+```{r}
+
+
+
+```
+
